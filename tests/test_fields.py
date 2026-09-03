@@ -81,6 +81,33 @@ def test_temperature_refresh_stays_normalized(grid, params):
     assert not np.allclose(temp.values, baseline)
 
 
+def test_weather_fronts_drift_and_are_deterministic(params):
+    weather = WeatherState()
+    a = weather.front_field(64, 80, seed=3, tick=1000)
+    b = weather.front_field(64, 80, seed=3, tick=1000)
+    later = weather.front_field(64, 80, seed=3, tick=6000)
+    assert a.shape == (64, 80)
+    assert np.array_equal(a, b)               # deterministic
+    assert not np.allclose(a, later)          # the field drifts over time
+    assert a.min() >= -1.0 and a.max() <= 1.0
+
+
+def test_climate_event_fires_and_expires(params):
+    weather = WeatherState()
+    rng = np.random.default_rng(0)
+    fired = False
+    for tick in range(0, 400_000, params.weather_interval):
+        weather.advance(tick, params, rng)
+        if weather.event:
+            fired = True
+            break
+    assert fired
+    for _ in range(weather.event_ticks + 5):
+        weather.advance(tick, params, np.random.default_rng(1))
+        tick += params.weather_interval
+    assert weather.event == ""
+
+
 def test_spectrum_decays_toward_zero(grid, params):
     spectrum = SpectrumField.for_grid(grid, params)
     spectrum.splat(20, 20, np.ones(spectrum.channels, dtype=np.float32))

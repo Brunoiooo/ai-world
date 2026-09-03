@@ -4,6 +4,7 @@ import pytest
 from ai_world.simulation.ecosystem import (
     act_system,
     default_systems,
+    max_hp,
     standing_upkeep,
     thermal_penalty,
     vitals_system,
@@ -63,6 +64,48 @@ def test_hp_drops_only_while_starving_and_regens_when_sated():
     assert pop.hp[2] > 0.5          # sated -> regenerates
 
 
+def test_max_hp_ceiling_falls_with_age():
+    params = EcoParams()
+    ph = Physiology.random(np.random.default_rng(0))
+    ph.senescence_rate = 0.0  # a no-senescence genome still ages (global aging_speed)
+    genome = Genome(ph, np.zeros(6, np.float32), np.zeros(3, np.float32))
+    young = max_hp(genome, params, age=0)
+    middle = max_hp(genome, params, age=10_000)
+    old = max_hp(genome, params, age=int(params.aging_scale))
+    assert young == pytest.approx(1.0)
+    assert middle < young
+    assert old == pytest.approx(params.aging_hp_floor, abs=1e-6)
+
+
+def test_senescence_rate_steepens_aging():
+    params = EcoParams()
+    base = Physiology.random(np.random.default_rng(1)).__dict__
+    slow = Genome(Physiology(**{**base, "senescence_rate": 0.0}),
+                  np.zeros(6, np.float32), np.zeros(3, np.float32))
+    fast = Genome(Physiology(**{**base, "senescence_rate": 2.0}),
+                  np.zeros(6, np.float32), np.zeros(3, np.float32))
+    assert max_hp(fast, params, 15_000) < max_hp(slow, params, 15_000)
+
+
+def test_aging_speed_zero_keeps_bodies_immortal():
+    params = EcoParams(aging_speed=0.0)
+    genome = Genome(Physiology.random(np.random.default_rng(2)),
+                    np.zeros(6, np.float32), np.zeros(3, np.float32))
+    assert max_hp(genome, params, age=1_000_000) == pytest.approx(1.0)
+
+
+def test_old_well_fed_organism_still_dies_of_old_age():
+    world = make_world(population=6)
+    pop = world.population
+    pop.energy[:] = 1.0   # perfectly fed: no starvation, hp would otherwise regen forever
+    pop.hp[:] = 1.0
+    pop.age[:] = int(world.eco_params.aging_scale) + 5_000
+    before = len(pop)
+    vitals_system(world)
+    assert len(pop) < before
+    assert pop.deaths > 0
+
+
 def test_starvation_kills_without_food():
     world = make_world(population=40)
     world.enzymes.values[:] = 0.0
@@ -102,7 +145,7 @@ def test_sexual_reproduction_crosses_two_parents():
     pop.species_id[0] = pop.species_id[1] = 1
     pop.mating_type[0] = [0.0, 0.0, 0.0]
     pop.mating_type[1] = [1.0, 0.0, 0.0]  # distance 1.0, inside the band
-    pop.energy[:] = 0.95
+    pop.energy[:] = 1.0  # full: one tick of upkeep still leaves them above repro_threshold
     pop.rebuild_index()
     n = len(pop)
     pop.i_turn = np.zeros(n)

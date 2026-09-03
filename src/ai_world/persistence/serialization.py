@@ -138,7 +138,9 @@ def deserialize_eco_state(
     blob: bytes,
 ) -> tuple[EcoParams, WeatherState, np.random.Generator, Innovations, dict]:
     doc = json.loads(zlib.decompress(blob).decode("utf-8"))
-    params = EcoParams(**doc["params"])
+    params_doc = dict(doc["params"])
+    params_doc["climate_event_ticks"] = tuple(params_doc["climate_event_ticks"])
+    params = EcoParams(**params_doc)
     weather = WeatherState(**doc["weather"])
     rng = np.random.default_rng()
     rng.bit_generator.state = doc["rng"]

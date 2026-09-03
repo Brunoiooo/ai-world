@@ -63,9 +63,14 @@ class World:
 
     def refresh_temperature(self) -> None:
         assert self.temperature and self.weather and self.eco_params
+        params = self.eco_params
+        fronts = self.weather.front_field(
+            self.height, self.width, self.seed, self.tick
+        ) * params.front_amplitude
         self.temperature.refresh(
-            self.weather.season_offset_scaled(self.eco_params.season_amplitude),
+            self.weather.season_offset_scaled(params.season_amplitude),
             self.weather.temperature_anomaly,
+            fronts,
         )
 
 

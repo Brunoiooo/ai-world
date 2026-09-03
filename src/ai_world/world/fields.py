@@ -198,9 +198,13 @@ class TemperatureField:
         )
         return cls(base, latitude_swing)
 
-    def refresh(self, season_offset: float, anomaly: float) -> None:
+    def refresh(
+        self, season_offset: float, anomaly: float, fronts: np.ndarray | None = None
+    ) -> None:
         """Recompute ``values`` from the static base plus the current climate."""
         self.values = self._base + season_offset * self._latitude_swing + anomaly
+        if fronts is not None:
+            self.values = self.values + fronts
         np.clip(self.values, 0.0, 1.0, out=self.values)
 
     def at(self, x: float, y: float) -> float:

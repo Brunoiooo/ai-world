@@ -77,6 +77,24 @@ def thermal_penalty(temperature: float, genome: Genome, params: EcoParams) -> fl
     return float(thermal_penalty_vec(np.array([temperature]), traits, params)[0])
 
 
+def max_hp_vec(traits: np.ndarray, params: EcoParams, age: np.ndarray) -> np.ndarray:
+    """Age ceiling on hp.
+
+    Falls linearly from 1.0 with age. ``aging_speed`` is a global knob that
+    evolution cannot escape; the genome's ``senescence_rate`` only steepens the
+    slope. A body that reaches the floor can no longer sustain itself, so the
+    population can never be a perpetual-motion machine.
+    """
+    gene_accel = 1.0 + params.aging_gene_influence * traits[:, _IX_SENESCENCE]
+    ceiling = 1.0 - params.aging_speed * gene_accel * (age / params.aging_scale)
+    return np.clip(ceiling, params.aging_hp_floor, 1.0)
+
+
+def max_hp(genome: Genome, params: EcoParams, age: int) -> float:
+    traits = physiology_vector(genome.physiology)[None, :]
+    return float(max_hp_vec(traits, params, np.array([age], dtype=float))[0])
+
+
 # --------------------------------------------------------------------------- #
 # systems
 # --------------------------------------------------------------------------- #
@@ -85,7 +103,7 @@ def weather_system(world: World) -> None:
     assert params and world.weather
     if world.tick % params.weather_interval != 0:
         return
-    world.weather.advance(world.tick, params)
+    world.weather.advance(world.tick, params, world.eco_rng)
     world.refresh_temperature()
 
 
@@ -191,12 +209,13 @@ def vitals_system(world: World) -> None:
         return
     params = world.eco_params
 
+    ceiling = max_hp_vec(pop.traits, params, pop.age.astype(np.float64))
     starving = pop.energy <= 0.0
     sated = pop.energy >= params.sated_energy
     pop.hp = pop.hp - np.where(starving, params.hp_decay_starving, 0.0)
-    pop.hp = np.minimum(
-        1.0, pop.hp + np.where(sated, pop.traits[:, _IX_REGEN], 0.0)
-    )
+    pop.hp = pop.hp + np.where(sated, pop.traits[:, _IX_REGEN], 0.0)
+    # the aging ceiling clamps hp down even when it was already high
+    pop.hp = np.minimum(pop.hp, ceiling)
 
     dead = (pop.hp <= 0.0) | (pop.age >= params.max_age)
     if dead.any():

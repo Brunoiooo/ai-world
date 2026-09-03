@@ -4,6 +4,7 @@ from __future__ import annotations
 import pygame
 
 from ai_world.simulation import Engine, SimulationClock, default_systems
+from ai_world.simulation.ecosystem import max_hp
 from ai_world.ui import theme
 from ai_world.ui.camera import Camera
 from ai_world.ui.entity_renderer import EntityRenderer
@@ -224,11 +225,14 @@ class SimulationScreen(Screen):
         ph = g.physiology
         in_ports = sum(1 for p in g.ports if p.mode == "in")
         out_ports = len(g.ports) - in_ports
+        params = self.world.eco_params
+        ceiling = max_hp(g, params, entity.age) if params else 1.0
         lines = [
             f"organism #{entity.id}   gen {entity.generation}   species {entity.species_id}",
-            f"energy {entity.energy:.2f}   hp {entity.hp:.2f}   age {entity.age:,}",
+            f"energy {entity.energy:.2f}   hp {entity.hp:.2f} / {ceiling:.2f} max   age {entity.age:,}",
             f"speed {entity.speed:.2f} / max {ph.max_speed:.2f}   size {ph.size:.2f}",
-            f"metabolism {ph.metabolic_efficiency:.2f}   regen {ph.hp_regen_rate:.3f}",
+            f"metabolism {ph.metabolic_efficiency:.2f}   regen {ph.hp_regen_rate:.3f}"
+            f"   senescence {ph.senescence_rate:.2f}",
             f"comfort {ph.comfort_center:.2f} ± {ph.comfort_width:.2f}   mut {ph.mutation_rate:.2f}",
             f"attack {ph.attack_power:.2f}   armor {ph.armor:.2f}",
             f"brain: {g.node_count} nodes · {g.enabled_conn_count} conns · "
