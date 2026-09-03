@@ -5,6 +5,7 @@ import sqlite3
 
 from ai_world.persistence.serialization import deserialize_genome, serialize_genome
 from ai_world.world.entity import Entity
+from ai_world.world.params import EcoParams
 from ai_world.world.population import Population
 
 _COLUMNS = (
@@ -55,11 +56,13 @@ def row_to_entity(row: sqlite3.Row) -> Entity:
     )
 
 
-def load_population(conn: sqlite3.Connection, world_id: int) -> Population:
+def load_population(
+    conn: sqlite3.Connection, world_id: int, params: EcoParams
+) -> Population:
     rows = conn.execute(
         "SELECT * FROM entities WHERE world_id = ? ORDER BY id", (world_id,)
     ).fetchall()
-    return Population([row_to_entity(r) for r in rows])
+    return Population([row_to_entity(r) for r in rows], params=params)
 
 
 def save_population(conn: sqlite3.Connection, world_id: int, population: Population) -> None:

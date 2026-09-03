@@ -15,6 +15,7 @@ from typing import Callable
 
 import numpy as np
 
+from ai_world.world.brain import ATTACK, EAT, MATE, THRUST, TURN
 from ai_world.world.entity import Entity
 from ai_world.world.genome import Genome, mutate, physiology_vector
 from ai_world.world.params import EcoParams
@@ -107,18 +108,20 @@ def sense_system(world: World) -> None:
 
 
 def think_system(world: World) -> None:
-    """Placeholder brain: a momentum-biased random walk that always tries to eat."""
+    """Run the whole population's recurrent brains for one tick."""
     pop = world.population
     if pop is None or not len(pop):
         return
-    n = len(pop)
-    rng = world.eco_rng
-    params = world.eco_params
-    pop.i_turn = np.clip(rng.normal(0.0, 0.35, n), -1.0, 1.0)
-    pop.i_thrust = rng.uniform(0.15, 1.0, n)
-    pop.i_eat = np.ones(n, dtype=bool)
-    pop.i_attack = (pop.traits[:, _IX_ATK] > 0.35) & (rng.random(n) < 0.05)
-    pop.i_mate = (pop.energy >= params.repro_threshold) & (rng.random(n) < 0.03)
+    tx = pop.x.astype(np.intp)
+    ty = pop.y.astype(np.intp)
+    temp_here = world.temperature.values[ty, tx]
+    outputs = pop.brains.step(pop, world.spectrum.values, temp_here)  # (n, 5)
+
+    pop.i_turn = outputs[:, TURN]                 # tanh node -> -1..1
+    pop.i_thrust = outputs[:, THRUST]             # sigmoid node -> 0..1
+    pop.i_eat = outputs[:, EAT] > 0.5
+    pop.i_attack = outputs[:, ATTACK] > 0.5
+    pop.i_mate = outputs[:, MATE] > 0.5
 
 
 def act_system(world: World) -> None:
@@ -166,8 +169,12 @@ def act_system(world: World) -> None:
         + thermal_penalty_vec(temp_here, traits, params)
         + np.where(tile == _DEEP_WATER, params.drown_penalty, 0.0)
     )
+    drain += params.port_upkeep * pop.brains.port_cost
+    drain += params.brain_node_upkeep * pop.brains.n_nodes
+    drain += params.brain_conn_upkeep * pop.brains.n_conns
     pop.energy = np.maximum(0.0, pop.energy - drain)
     pop.age += 1
+    pop.last_turn = pop.i_turn.copy()
 
     for i in np.flatnonzero(pop.i_attack):
         _resolve_attack(pop, int(i), params)
@@ -235,7 +242,7 @@ def _reproduce(world: World, pop: Population, params: EcoParams) -> None:
                 heading=float(rng.random() * _TWO_PI),
                 energy=params.repro_cost,
                 hp=1.0,
-                genome=mutate(pop.genomes[i], rng),
+                genome=mutate(pop.genomes[i], rng, world.innovations, params),
                 birth_tick=world.tick,
                 generation=int(pop.generation[i]) + 1,
                 parent_a=int(pop.id[i]),

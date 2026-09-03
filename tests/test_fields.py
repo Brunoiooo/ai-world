@@ -91,17 +91,21 @@ def test_spectrum_decays_toward_zero(grid, params):
 
 
 def test_eco_state_roundtrip(params):
+    from ai_world.world.genome import Innovations
+
     weather = WeatherState()
     weather.advance(12_345, params)
     rng = np.random.default_rng(99)
     rng.random(10)  # advance it
+    innov = Innovations(conn={(0, 9): 0, (1, 10): 1}, next_conn=2, next_node=15)
 
-    blob = serialize_eco_state(params, weather, rng)
-    rp, rw, rr = deserialize_eco_state(blob)
+    blob = serialize_eco_state(params, weather, rng, innov)
+    rp, rw, rr, ri = deserialize_eco_state(blob)
 
     assert rp == params
     assert rw == weather
     assert rr.random() == rng.random()
+    assert ri.conn == innov.conn and ri.next_node == 15
 
 
 def test_world_create_attaches_ecosystem_within_size_limit():

@@ -8,7 +8,7 @@ import numpy as np
 
 from ai_world.world.entity import Entity
 from ai_world.world.fields import EnzymeField, SpectrumField, TemperatureField
-from ai_world.world.genome import Genome
+from ai_world.world.genome import Genome, Innovations
 from ai_world.world.grid import Grid
 from ai_world.world.params import ECOSYSTEM_MAX_DIM, EcoParams
 from ai_world.world.population import Population
@@ -37,6 +37,7 @@ class World:
     # --- ecosystem (present only when enabled for this world) -----------
     eco_params: EcoParams | None = None
     eco_rng: np.random.Generator | None = None
+    innovations: Innovations | None = None
     enzymes: EnzymeField | None = None
     spectrum: SpectrumField | None = None
     temperature: TemperatureField | None = None
@@ -74,6 +75,7 @@ def attach_ecosystem(world: World, params: EcoParams) -> None:
     """Create a fresh field substrate + climate + blind-start population."""
     world.eco_params = params
     world.eco_rng = np.random.default_rng((world.seed ^ _ECO_RNG_SALT) & 0xFFFFFFFF)
+    world.innovations = Innovations()
     world.enzymes = EnzymeField.for_grid(world.grid, params, world.eco_rng)
     world.spectrum = SpectrumField.for_grid(world.grid, params)
     world.temperature = TemperatureField.for_grid(world.grid, params, world.seed)
@@ -88,6 +90,7 @@ def rebuild_ecosystem(
     params: EcoParams,
     weather: WeatherState,
     rng: np.random.Generator,
+    innovations: Innovations,
     enzyme_values: np.ndarray,
     spectrum_values: np.ndarray,
     population: Population,
@@ -95,6 +98,7 @@ def rebuild_ecosystem(
     """Restore a persisted ecosystem onto ``world``."""
     world.eco_params = params
     world.eco_rng = rng
+    world.innovations = innovations
     world.weather = weather
     world.enzymes = EnzymeField.rebuild(world.grid, params, enzyme_values)
     world.spectrum = SpectrumField.rebuild(params, spectrum_values)
@@ -104,13 +108,14 @@ def rebuild_ecosystem(
 
 
 def _seed_population(world: World) -> None:
-    params, rng = world.eco_params, world.eco_rng
-    assert params and rng is not None
-    world.population = Population()
+    params, rng, innov = world.eco_params, world.eco_rng, world.innovations
+    assert params and rng is not None and innov is not None
+    world.population = Population(params=params)
 
     land = np.argwhere(np.isin(world.grid.cells, _SPAWN_TILES))
     if len(land) == 0:
         return
+    picks = land[rng.integers(0, len(land), size=params.initial_population)]
     newborns = [
         Entity(
             id=world.population.new_id(),
@@ -119,9 +124,9 @@ def _seed_population(world: World) -> None:
             heading=float(rng.random() * _TWO_PI),
             energy=params.spawn_energy,
             hp=1.0,
-            genome=Genome.random_blind(rng, params),
+            genome=Genome.random_blind(rng, params, innov),
             birth_tick=world.tick,
         )
-        for row in land[rng.integers(0, len(land), size=params.initial_population)]
+        for row in picks
     ]
     world.population.add_many(newborns)

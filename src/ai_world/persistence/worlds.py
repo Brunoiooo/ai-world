@@ -48,26 +48,29 @@ def _eco_blobs(world: World) -> tuple[bytes | None, bytes | None, bytes | None]:
     if not world.ecosystem_enabled:
         return None, None, None
     assert world.enzymes and world.spectrum and world.eco_params
-    assert world.weather and world.eco_rng is not None
+    assert world.weather and world.eco_rng is not None and world.innovations is not None
     return (
         serialize_array(world.enzymes.values),
         serialize_array(world.spectrum.values),
-        serialize_eco_state(world.eco_params, world.weather, world.eco_rng),
+        serialize_eco_state(
+            world.eco_params, world.weather, world.eco_rng, world.innovations
+        ),
     )
 
 
 def _restore_ecosystem(conn: sqlite3.Connection, world: World, row: sqlite3.Row) -> None:
     if row["eco_state"] is None:
         return
-    params, weather, rng = deserialize_eco_state(row["eco_state"])
+    params, weather, rng, innovations = deserialize_eco_state(row["eco_state"])
     rebuild_ecosystem(
         world,
         params,
         weather,
         rng,
+        innovations,
         deserialize_array(row["enzymes"]),
         deserialize_array(row["spectrum"]),
-        load_population(conn, world.id),
+        load_population(conn, world.id, params),
     )
 
 

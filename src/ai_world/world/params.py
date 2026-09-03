@@ -47,6 +47,10 @@ class EcoParams:
     population_soft_cap: int = 800
     spawn_energy: float = 0.5
 
+    # --- brain --------------------------------------------------------
+    brain_max_nodes: int = 32      # hard cap on nodes per organism (batch padding width)
+    brain_sensor_samples: int = 5  # ray samples per IN port per tick
+
     # --- metabolism (all drains are energy per tick) -------------------
     base_upkeep: float = 0.0009
     size_upkeep: float = 0.0011          # x physiology.size

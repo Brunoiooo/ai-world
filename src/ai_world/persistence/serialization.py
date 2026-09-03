@@ -8,12 +8,19 @@ from dataclasses import asdict
 
 import numpy as np
 
-from ai_world.world.genome import Genome, Physiology
+from ai_world.world.genome import (
+    ConnGene,
+    Genome,
+    Innovations,
+    NodeGene,
+    Physiology,
+    PortGene,
+)
 from ai_world.world.grid import Grid
 from ai_world.world.params import EcoParams
 from ai_world.world.weather import WeatherState
 
-_GENOME_VERSION = 2
+_GENOME_VERSION = 3
 
 _GRID_MAGIC = b"AWG1"   # ai-world grid, version 1
 _ARRAY_MAGIC = b"AWA1"   # self-describing float32 array, version 1
@@ -62,6 +69,13 @@ def serialize_genome(genome: Genome) -> bytes:
         "physiology": asdict(genome.physiology),
         "body_signature": genome.body_signature.astype(float).tolist(),
         "mating_type": genome.mating_type.astype(float).tolist(),
+        "nodes": [[n.id, n.kind, n.activation] for n in genome.nodes],
+        "conns": [[c.innov, c.src, c.dst, c.weight, c.enabled] for c in genome.conns],
+        "ports": [
+            [p.node_id, p.mode, p.signature.astype(float).tolist(),
+             p.angle, p.arc, p.reach, p.gain]
+            for p in genome.ports
+        ],
     }
     return json.dumps(doc, separators=(",", ":")).encode("utf-8")
 
@@ -72,27 +86,59 @@ def deserialize_genome(blob: bytes) -> Genome:
         physiology=Physiology(**doc["physiology"]),
         body_signature=np.asarray(doc["body_signature"], dtype=np.float32),
         mating_type=np.asarray(doc["mating_type"], dtype=np.float32),
+        nodes=[NodeGene(i, k, a) for i, k, a in doc.get("nodes", [])],
+        conns=[
+            ConnGene(innov, src, dst, w, bool(en))
+            for innov, src, dst, w, en in doc.get("conns", [])
+        ],
+        ports=[
+            PortGene(nid, mode, np.asarray(sig, dtype=np.float32), ang, arc, reach, gain)
+            for nid, mode, sig, ang, arc, reach, gain in doc.get("ports", [])
+        ],
+    )
+
+
+def _pack_innovations(innov: Innovations) -> dict:
+    return {
+        "conn": [[a, b, i] for (a, b), i in innov.conn.items()],
+        "node_split": [[a, b, i] for (a, b), i in innov.node_split.items()],
+        "next_conn": innov.next_conn,
+        "next_node": innov.next_node,
+    }
+
+
+def _unpack_innovations(doc: dict) -> Innovations:
+    return Innovations(
+        conn={(a, b): i for a, b, i in doc["conn"]},
+        node_split={(a, b): i for a, b, i in doc["node_split"]},
+        next_conn=doc["next_conn"],
+        next_node=doc["next_node"],
     )
 
 
 def serialize_eco_state(
-    params: EcoParams, weather: WeatherState, rng: np.random.Generator
+    params: EcoParams,
+    weather: WeatherState,
+    rng: np.random.Generator,
+    innovations: Innovations,
 ) -> bytes:
     doc = {
         "version": _ECO_STATE_VERSION,
         "params": asdict(params),
         "weather": asdict(weather),
         "rng": rng.bit_generator.state,
+        "innovations": _pack_innovations(innovations),
     }
     return zlib.compress(json.dumps(doc).encode("utf-8"), level=6)
 
 
 def deserialize_eco_state(
     blob: bytes,
-) -> tuple[EcoParams, WeatherState, np.random.Generator]:
+) -> tuple[EcoParams, WeatherState, np.random.Generator, Innovations]:
     doc = json.loads(zlib.decompress(blob).decode("utf-8"))
     params = EcoParams(**doc["params"])
     weather = WeatherState(**doc["weather"])
     rng = np.random.default_rng()
     rng.bit_generator.state = doc["rng"]
-    return params, weather, rng
+    innovations = _unpack_innovations(doc["innovations"])
+    return params, weather, rng, innovations

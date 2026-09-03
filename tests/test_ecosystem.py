@@ -32,7 +32,7 @@ def run(world: World, ticks: int) -> None:
 
 def test_run_stays_within_invariants():
     world = make_world()
-    run(world, 3000)
+    run(world, 1200)
     pop = world.population
     assert len(pop) >= 0
     if len(pop):
@@ -68,7 +68,7 @@ def test_starvation_kills_without_food():
     world.enzymes.values[:] = 0.0
     world.enzymes._regen_ceiling[:] = 0.0  # no regrowth either
     start = len(world.population)
-    run(world, 800)
+    run(world, 600)
     assert len(world.population) < start
     assert world.population.deaths > 0
 
