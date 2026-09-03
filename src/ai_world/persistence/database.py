@@ -27,6 +27,27 @@ _MIGRATIONS: list[str] = [
     ALTER TABLE worlds ADD COLUMN spectrum  BLOB;
     ALTER TABLE worlds ADD COLUMN eco_state BLOB;
     """,
+    # v3 -- organisms
+    """
+    CREATE TABLE entities (
+        world_id    INTEGER NOT NULL REFERENCES worlds(id) ON DELETE CASCADE,
+        id          INTEGER NOT NULL,
+        x           REAL    NOT NULL,
+        y           REAL    NOT NULL,
+        heading     REAL    NOT NULL,
+        energy      REAL    NOT NULL,
+        hp          REAL    NOT NULL,
+        age         INTEGER NOT NULL,
+        birth_tick  INTEGER NOT NULL,
+        generation  INTEGER NOT NULL,
+        species_id  INTEGER NOT NULL,
+        parent_a    INTEGER,
+        parent_b    INTEGER,
+        genome      BLOB    NOT NULL,
+        brain_state BLOB,
+        PRIMARY KEY (world_id, id)
+    );
+    """,
 ]
 
 

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from ai_world.config import MAX_MAP_DIM, MIN_MAP_DIM
+from ai_world.persistence.entities import load_population, save_population
 from ai_world.persistence.serialization import (
     deserialize_array,
     deserialize_eco_state,
@@ -55,7 +56,7 @@ def _eco_blobs(world: World) -> tuple[bytes | None, bytes | None, bytes | None]:
     )
 
 
-def _restore_ecosystem(world: World, row: sqlite3.Row) -> None:
+def _restore_ecosystem(conn: sqlite3.Connection, world: World, row: sqlite3.Row) -> None:
     if row["eco_state"] is None:
         return
     params, weather, rng = deserialize_eco_state(row["eco_state"])
@@ -66,6 +67,7 @@ def _restore_ecosystem(world: World, row: sqlite3.Row) -> None:
         rng,
         deserialize_array(row["enzymes"]),
         deserialize_array(row["spectrum"]),
+        load_population(conn, world.id),
     )
 
 
@@ -109,7 +111,7 @@ class WorldRepository:
             created_at=_parse_dt(row["created_at"]),
             updated_at=_parse_dt(row["updated_at"]),
         )
-        _restore_ecosystem(world, row)
+        _restore_ecosystem(self._conn, world, row)
         return world
 
     # --- writes ------------------------------------------------------
@@ -146,8 +148,10 @@ class WorldRepository:
                 eco_state,
             ),
         )
-        self._conn.commit()
         world.id = int(cur.lastrowid)
+        if world.population is not None:
+            save_population(self._conn, world.id, world.population)
+        self._conn.commit()
         return world
 
     def save(self, world: World) -> None:
@@ -169,6 +173,8 @@ class WorldRepository:
                 world.id,
             ),
         )
+        if world.population is not None:
+            save_population(self._conn, world.id, world.population)
         self._conn.commit()
 
     def rename(self, world_id: int, name: str) -> None:

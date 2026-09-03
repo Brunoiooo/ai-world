@@ -8,9 +8,12 @@ from dataclasses import asdict
 
 import numpy as np
 
+from ai_world.world.genome import Genome, Physiology
 from ai_world.world.grid import Grid
 from ai_world.world.params import EcoParams
 from ai_world.world.weather import WeatherState
+
+_GENOME_VERSION = 2
 
 _GRID_MAGIC = b"AWG1"   # ai-world grid, version 1
 _ARRAY_MAGIC = b"AWA1"   # self-describing float32 array, version 1
@@ -51,6 +54,25 @@ def deserialize_array(blob: bytes) -> np.ndarray:
     offset += 4 * ndim
     raw = zlib.decompress(blob[offset:])
     return np.frombuffer(raw, dtype=np.float32).reshape(shape).copy()
+
+
+def serialize_genome(genome: Genome) -> bytes:
+    doc = {
+        "v": _GENOME_VERSION,
+        "physiology": asdict(genome.physiology),
+        "body_signature": genome.body_signature.astype(float).tolist(),
+        "mating_type": genome.mating_type.astype(float).tolist(),
+    }
+    return json.dumps(doc, separators=(",", ":")).encode("utf-8")
+
+
+def deserialize_genome(blob: bytes) -> Genome:
+    doc = json.loads(blob.decode("utf-8"))
+    return Genome(
+        physiology=Physiology(**doc["physiology"]),
+        body_signature=np.asarray(doc["body_signature"], dtype=np.float32),
+        mating_type=np.asarray(doc["mating_type"], dtype=np.float32),
+    )
 
 
 def serialize_eco_state(

@@ -6,6 +6,7 @@ import pygame
 from ai_world.simulation import Engine, SimulationClock, default_systems
 from ai_world.ui import theme
 from ai_world.ui.camera import Camera
+from ai_world.ui.entity_renderer import EntityRenderer
 from ai_world.ui.field_overlay import FieldOverlay
 from ai_world.ui.renderer import GridRenderer
 from ai_world.ui.screens.base import Screen
@@ -29,11 +30,16 @@ class SimulationScreen(Screen):
         self.camera = Camera(self.world.width, self.world.height, self.app.surface.get_size())
         self.renderer = GridRenderer(self.world.grid)
         self.overlay = FieldOverlay()
+        self.entities = EntityRenderer()
+        self._selected_id: int | None = None
+        self._show_entities = True
         self._dragging = False
         self._menu_open = False
         self._status = ""
         self._status_timer = 0.0
         self._ticks_last_frame = 0
+        if self.world.population is not None:
+            self.world.population.rebuild_index()
         self._build_menu()
 
     def _build_menu(self) -> None:
@@ -103,6 +109,15 @@ class SimulationScreen(Screen):
             self._dragging = False
         elif event.type == pygame.MOUSEMOTION and self._dragging:
             self.camera.pan_pixels(-event.rel[0], -event.rel[1])
+        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            self._select_at(event.pos)
+
+    def _select_at(self, screen_pos: tuple[int, int]) -> None:
+        if self.world.population is None or screen_pos[1] <= _TOP_BAR:
+            return
+        wx, wy = self.camera.screen_to_world(*screen_pos)
+        picked = self.entities.pick(self.world, wx, wy, radius_tiles=6.0 / self.camera.zoom + 1.0)
+        self._selected_id = picked.id if picked else None
 
     def _handle_key(self, key: int, mod: int) -> None:
         if key == pygame.K_ESCAPE:
@@ -119,6 +134,8 @@ class SimulationScreen(Screen):
             self.camera.fit(self.app.surface.get_size())
         elif key == pygame.K_F5 or (key == pygame.K_s and mod & pygame.KMOD_CTRL):
             self._save()
+        elif key == pygame.K_h:
+            self._show_entities = not self._show_entities
         elif key == pygame.K_e:
             self.overlay.toggle("enzymes")
         elif key == pygame.K_t:
@@ -147,10 +164,46 @@ class SimulationScreen(Screen):
     def draw(self, surface: pygame.Surface) -> None:
         self.renderer.draw(surface, self.camera)
         self.overlay.draw(surface, self.camera, self.world)
+        if self._show_entities:
+            self.entities.draw(surface, self.camera, self.world)
         self._draw_top_bar(surface)
         self._draw_hint_bar(surface)
+        self._draw_inspector(surface)
         if self._menu_open:
             self._draw_menu(surface)
+
+    def _selected(self):
+        if self._selected_id is None or self.world.population is None:
+            return None
+        i = self.world.population.index_of(self._selected_id)
+        return None if i is None else self.world.population.snapshot(i)
+
+    def _draw_inspector(self, surface: pygame.Surface) -> None:
+        entity = self._selected()
+        if entity is None:
+            return
+        ph = entity.genome.physiology
+        lines = [
+            f"organism #{entity.id}   gen {entity.generation}",
+            f"energy {entity.energy:.2f}   hp {entity.hp:.2f}   age {entity.age:,}",
+            f"speed {entity.speed:.2f} / max {ph.max_speed:.2f}   size {ph.size:.2f}",
+            f"metabolism {ph.metabolic_efficiency:.2f}   regen {ph.hp_regen_rate:.3f}",
+            f"comfort {ph.comfort_center:.2f} ± {ph.comfort_width:.2f}",
+            f"attack {ph.attack_power:.2f}   armor {ph.armor:.2f}   mut {ph.mutation_rate:.2f}",
+        ]
+        font = self.app.fonts.get(14)
+        pad, lh = 10, 18
+        pw = max(font.size(s)[0] for s in lines) + pad * 2
+        panel = pygame.Rect(12, _TOP_BAR + 12, pw, lh * len(lines) + pad * 2)
+        box = pygame.Surface(panel.size, pygame.SRCALPHA)
+        box.fill((*theme.PANEL, 235))
+        surface.blit(box, panel.topleft)
+        pygame.draw.rect(surface, theme.BORDER, panel, 1)
+        for i, text in enumerate(lines):
+            surface.blit(font.render(text, True, theme.TEXT), (panel.x + pad, panel.y + pad + i * lh))
+
+        sx, sy = self.camera.world_to_screen(entity.x, entity.y)
+        pygame.draw.circle(surface, theme.ACCENT, (sx, sy), 10, 2)
 
     def _draw_top_bar(self, surface: pygame.Surface) -> None:
         w = surface.get_width()
@@ -181,6 +234,16 @@ class SimulationScreen(Screen):
             (tps, theme.TEXT_DIM, small),
             (f"{self.app.clock.get_fps():.0f} FPS", theme.TEXT_DIM, small),
         ]
+        pop = self.world.population
+        if pop is not None:
+            count = len(pop)
+            mean_energy = float(pop.energy.mean()) if count else 0.0
+            label = "extinct" if not count else f"pop {count:,}"
+            stats.insert(2, (label, theme.WARN if not count else theme.TEXT, big))
+            stats.insert(3, (
+                f"ē {mean_energy:.2f}   +{pop.births:,}/-{pop.deaths:,}",
+                theme.TEXT_DIM, small,
+            ))
         x = w - 16
         for text, col, font in reversed(stats):
             rendered = font.render(text, True, col)
@@ -211,7 +274,7 @@ class SimulationScreen(Screen):
                 "F: fit   F5: save   Esc: menu")
         if self.world.ecosystem_enabled:
             overlay = self.overlay.label or "off"
-            text += f"   |   E/T/1-6: field overlay ({overlay})"
+            text += f"   |   E/T/1-6: overlay ({overlay})   H: organisms   click: inspect"
         rendered = self.app.fonts.get(14).render(text, True, theme.TEXT_DIM)
         bar = pygame.Rect(0, h - 26, w, 26)
         pygame.draw.rect(surface, theme.PANEL, bar)

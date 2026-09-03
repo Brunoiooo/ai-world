@@ -64,16 +64,23 @@ def _terrain_temperature_map(grid: Grid) -> np.ndarray:
 def _diffuse(a: np.ndarray, rate: float) -> None:
     """In-place isotropic diffusion of a 2D plane (clamped, non-wrapping boundary).
 
-    Kept per-plane on purpose: batching the spectrum's channels into one 3D op
-    is measurably slower here (larger temporaries spill cache).
+    Kept per-plane and pad-free on purpose: ``np.pad`` and 3D batching both
+    measured slower here (allocation + cache spill).
     """
     if rate <= 0.0:
         return
-    p = np.pad(a, 1, mode="edge")
-    laplacian = (
-        p[:-2, 1:-1] + p[2:, 1:-1] + p[1:-1, :-2] + p[1:-1, 2:] - 4.0 * a
-    )
-    a += rate * laplacian
+    lap = np.full_like(a, 0.0)
+    lap[1:, :] += a[:-1, :]
+    lap[:-1, :] += a[1:, :]
+    lap[:, 1:] += a[:, :-1]
+    lap[:, :-1] += a[:, 1:]
+    # clamped boundary: the off-grid neighbour equals the edge cell itself
+    lap[0, :] += a[0, :]
+    lap[-1, :] += a[-1, :]
+    lap[:, 0] += a[:, 0]
+    lap[:, -1] += a[:, -1]
+    lap -= 4.0 * a
+    a += rate * lap
 
 
 def _bilinear(a: np.ndarray, x: float, y: float) -> np.ndarray:
