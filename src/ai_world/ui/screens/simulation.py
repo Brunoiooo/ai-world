@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import pygame
 
-from ai_world.simulation import Engine, SimulationClock
+from ai_world.simulation import Engine, SimulationClock, default_systems
 from ai_world.ui import theme
 from ai_world.ui.camera import Camera
+from ai_world.ui.field_overlay import FieldOverlay
 from ai_world.ui.renderer import GridRenderer
 from ai_world.ui.screens.base import Screen
 from ai_world.ui.widgets import Button
+from ai_world.world.fields import TemperatureField
 from ai_world.world.tiles import TILE_NAMES
 
 _TOP_BAR = 60
@@ -19,12 +21,14 @@ class SimulationScreen(Screen):
     def __init__(self, app, world):
         super().__init__(app)
         self.world = world
-        self.engine = Engine(world)
+        systems = default_systems() if world.ecosystem_enabled else []
+        self.engine = Engine(world, systems)
         self.clock = SimulationClock()
 
     def on_enter(self) -> None:
         self.camera = Camera(self.world.width, self.world.height, self.app.surface.get_size())
         self.renderer = GridRenderer(self.world.grid)
+        self.overlay = FieldOverlay()
         self._dragging = False
         self._menu_open = False
         self._status = ""
@@ -115,6 +119,12 @@ class SimulationScreen(Screen):
             self.camera.fit(self.app.surface.get_size())
         elif key == pygame.K_F5 or (key == pygame.K_s and mod & pygame.KMOD_CTRL):
             self._save()
+        elif key == pygame.K_e:
+            self.overlay.toggle("enzymes")
+        elif key == pygame.K_t:
+            self.overlay.toggle("temperature")
+        elif pygame.K_1 <= key <= pygame.K_6:
+            self.overlay.toggle(("spectrum", key - pygame.K_1))
 
     # --- update --------------------------------------------------
     def update(self, dt: float) -> None:
@@ -136,6 +146,7 @@ class SimulationScreen(Screen):
     # --- drawing ------------------------------------------------
     def draw(self, surface: pygame.Surface) -> None:
         self.renderer.draw(surface, self.camera)
+        self.overlay.draw(surface, self.camera, self.world)
         self._draw_top_bar(surface)
         self._draw_hint_bar(surface)
         if self._menu_open:
@@ -185,12 +196,22 @@ class SimulationScreen(Screen):
             if 0 <= tx < self.world.width and 0 <= ty < self.world.height:
                 tile = self.world.grid.get(tx, ty)
                 label = f"({tx}, {ty}) {TILE_NAMES.get(tile, '?')}"
-                surface.blit(small.render(label, True, theme.TEXT_DIM), (w // 2 - 60, 34))
+                if self.world.ecosystem_enabled:
+                    temp = self.world.temperature.at(tx, ty)
+                    enzyme = float(self.world.enzymes.values[ty, tx])
+                    label += (
+                        f"   {TemperatureField.to_celsius(temp):.0f}°C"
+                        f"   enzyme {enzyme:.2f}"
+                    )
+                surface.blit(small.render(label, True, theme.TEXT_DIM), (w // 2 - 120, 34))
 
     def _draw_hint_bar(self, surface: pygame.Surface) -> None:
         w, h = surface.get_size()
-        text = ("Space: pause   +/-: speed   0: reset   "
-                "WASD/arrows: pan   wheel: zoom   F: fit   F5: save   Esc: menu")
+        text = ("Space: pause   +/-: speed   0: reset   WASD: pan   wheel: zoom   "
+                "F: fit   F5: save   Esc: menu")
+        if self.world.ecosystem_enabled:
+            overlay = self.overlay.label or "off"
+            text += f"   |   E/T/1-6: field overlay ({overlay})"
         rendered = self.app.fonts.get(14).render(text, True, theme.TEXT_DIM)
         bar = pygame.Rect(0, h - 26, w, 26)
         pygame.draw.rect(surface, theme.PANEL, bar)

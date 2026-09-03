@@ -21,6 +21,12 @@ _MIGRATIONS: list[str] = [
         grid       BLOB    NOT NULL
     );
     """,
+    # v2 -- ecosystem field substrate (nullable: worlds may be terrain-only)
+    """
+    ALTER TABLE worlds ADD COLUMN enzymes   BLOB;
+    ALTER TABLE worlds ADD COLUMN spectrum  BLOB;
+    ALTER TABLE worlds ADD COLUMN eco_state BLOB;
+    """,
 ]
 
 
