@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 # terrain-only.
 ECOSYSTEM_MAX_DIM = 512
 
-DEFAULT_ECOSYSTEM_DIM = 192
+DEFAULT_ECOSYSTEM_DIM = 144
 
 
 @dataclass(frozen=True)
@@ -43,30 +43,30 @@ class EcoParams:
     altitude_lapse: float = 0.45    # normalized temperature lost from sea level to peak
 
     # --- population ----------------------------------------------------
-    initial_population: int = 300
-    population_soft_cap: int = 800
-    spawn_energy: float = 0.5
+    initial_population: int = 600
+    population_soft_cap: int = 900
+    spawn_energy: float = 0.7
 
     # --- brain --------------------------------------------------------
     brain_max_nodes: int = 32      # hard cap on nodes per organism (batch padding width)
     brain_sensor_samples: int = 5  # ray samples per IN port per tick
 
     # --- metabolism (all drains are energy per tick) -------------------
-    base_upkeep: float = 0.0009
-    size_upkeep: float = 0.0011          # x physiology.size
-    speed_upkeep: float = 0.0016         # x physiology.max_speed (standing cost of the capacity)
-    regen_upkeep: float = 0.030          # x physiology.hp_regen_rate (self-repair is expensive)
-    tolerance_upkeep: float = 0.0016     # x (1 / comfort_width - 1), cost of a narrow comfort band
-    combat_upkeep: float = 0.0009        # x (attack_power + armor)
-    brain_node_upkeep: float = 0.00010   # x active brain nodes   (Phase 3)
-    brain_conn_upkeep: float = 0.00003   # x enabled connections  (Phase 3)
-    port_upkeep: float = 0.0006          # x sum(reach^2 / arc)    (Phase 3)
-    move_cost: float = 0.010             # x (speed / max_speed_ref)^2
+    base_upkeep: float = 0.00040
+    size_upkeep: float = 0.00050         # x physiology.size
+    speed_upkeep: float = 0.00070        # x physiology.max_speed (standing cost of the capacity)
+    regen_upkeep: float = 0.012          # x physiology.hp_regen_rate (self-repair is expensive)
+    tolerance_upkeep: float = 0.00070    # x (1 / comfort_width - 1), cost of a narrow comfort band
+    combat_upkeep: float = 0.00040       # x (attack_power + armor)
+    brain_node_upkeep: float = 0.000040  # x active brain nodes
+    brain_conn_upkeep: float = 0.000020  # x enabled connections
+    port_upkeep: float = 0.00020         # x sum(gain * reach^2 / arc)
+    move_cost: float = 0.008             # x speed^2
     attack_cost: float = 0.02
-    emit_cost: float = 0.004
+    emit_cost: float = 0.003
 
     # --- feeding / vitals --------------------------------------------
-    eat_rate: float = 0.06               # max enzyme absorbed per tick
+    eat_rate: float = 0.10               # max enzyme absorbed per tick
     sated_energy: float = 0.7            # at/above this, hp regenerates
     hp_decay_starving: float = 0.02      # hp lost per tick while energy == 0
     thermal_penalty: float = 0.020       # energy/tick per unit of temperature outside the comfort band
@@ -75,9 +75,14 @@ class EcoParams:
     corpse_enzyme_fraction: float = 0.6  # of body mass returned to the tile on death
     max_age: int = 200_000              # hard senescence cutoff (safety)
 
-    # --- reproduction (Phase 2: asexual placeholder; Phase 4: sexual) --
-    repro_threshold: float = 0.75        # min energy to reproduce
-    repro_cost: float = 0.45             # energy handed to the offspring (per parent in Phase 4)
+    # --- reproduction (sexual) --------------------------------------
+    repro_threshold: float = 0.55        # min energy for each parent to mate
+    repro_cost: float = 0.22             # energy each parent contributes to the offspring
+    mating_range: float = 6.0            # tiles within which a partner can be found
+    mating_type_lo: float = 0.15         # partners must differ by more than this
+    mating_type_hi: float = 4.0          # ...and less than this (same broad type)
+    species_threshold: float = 8.0       # initial compatibility distance (starts as ~1 species)
+    species_target: int = 12             # threshold self-adjusts toward this many species
 
     # --- simulation cadence (run these systems every N ticks) -----------
     weather_interval: int = 4

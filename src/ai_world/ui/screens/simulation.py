@@ -33,6 +33,7 @@ class SimulationScreen(Screen):
         self.entities = EntityRenderer()
         self._selected_id: int | None = None
         self._show_entities = True
+        self._show_species = False
         self._dragging = False
         self._menu_open = False
         self._status = ""
@@ -136,6 +137,8 @@ class SimulationScreen(Screen):
             self._save()
         elif key == pygame.K_h:
             self._show_entities = not self._show_entities
+        elif key == pygame.K_TAB:
+            self._show_species = not self._show_species
         elif key == pygame.K_e:
             self.overlay.toggle("enzymes")
         elif key == pygame.K_t:
@@ -169,8 +172,43 @@ class SimulationScreen(Screen):
         self._draw_top_bar(surface)
         self._draw_hint_bar(surface)
         self._draw_inspector(surface)
+        if self._show_species:
+            self._draw_species_panel(surface)
         if self._menu_open:
             self._draw_menu(surface)
+
+    def _draw_species_panel(self, surface: pygame.Surface) -> None:
+        registry = self.world.species
+        if registry is None:
+            return
+        from ai_world.ui.entity_renderer import signature_rgb
+
+        species = registry.sorted_species()[:14]
+        total = max(1, sum(s.count for s in species))
+        w = surface.get_width()
+        pw, rowh = 250, 22
+        panel = pygame.Rect(w - pw - 12, _TOP_BAR + 12, pw, rowh * (len(species) + 1) + 16)
+        box = pygame.Surface(panel.size, pygame.SRCALPHA)
+        box.fill((*theme.PANEL, 235))
+        surface.blit(box, panel.topleft)
+        pygame.draw.rect(surface, theme.BORDER, panel, 1)
+
+        font = self.app.fonts.get(14)
+        surface.blit(
+            self.app.fonts.get(14, bold=True).render(
+                f"{len(registry.species)} species  ·  thr {registry.threshold:.1f}",
+                True, theme.TEXT),
+            (panel.x + 10, panel.y + 8),
+        )
+        for i, sp in enumerate(species):
+            y = panel.y + 12 + (i + 1) * rowh
+            colour = signature_rgb(sp.representative.body_signature)
+            pygame.draw.rect(surface, colour, (panel.x + 10, y + 3, 12, 12))
+            surface.blit(font.render(f"#{sp.id}", True, theme.TEXT_DIM), (panel.x + 30, y))
+            bar_w = int((pw - 110) * sp.count / total)
+            pygame.draw.rect(surface, theme.ACCENT_DIM, (panel.x + 70, y + 3, bar_w, 12))
+            surface.blit(font.render(str(sp.count), True, theme.TEXT_DIM),
+                         (panel.x + pw - 36, y))
 
     def _selected(self):
         if self._selected_id is None or self.world.population is None:
@@ -245,8 +283,9 @@ class SimulationScreen(Screen):
             mean_energy = float(pop.energy.mean()) if count else 0.0
             label = "extinct" if not count else f"pop {count:,}"
             stats.insert(2, (label, theme.WARN if not count else theme.TEXT, big))
+            n_species = len(self.world.species.species) if self.world.species else 0
             stats.insert(3, (
-                f"ē {mean_energy:.2f}   +{pop.births:,}/-{pop.deaths:,}",
+                f"E {mean_energy:.2f}   {n_species} sp   +{pop.births:,}/-{pop.deaths:,}",
                 theme.TEXT_DIM, small,
             ))
         x = w - 16
@@ -279,7 +318,8 @@ class SimulationScreen(Screen):
                 "F: fit   F5: save   Esc: menu")
         if self.world.ecosystem_enabled:
             overlay = self.overlay.label or "off"
-            text += f"   |   E/T/1-6: overlay ({overlay})   H: organisms   click: inspect"
+            text += (f"   |   E/T/1-6: overlay ({overlay})   H: organisms   "
+                     f"Tab: species   click: inspect")
         rendered = self.app.fonts.get(14).render(text, True, theme.TEXT_DIM)
         bar = pygame.Rect(0, h - 26, w, 26)
         pygame.draw.rect(surface, theme.PANEL, bar)

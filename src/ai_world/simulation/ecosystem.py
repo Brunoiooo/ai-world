@@ -17,7 +17,7 @@ import numpy as np
 
 from ai_world.world.brain import ATTACK, EAT, MATE, THRUST, TURN
 from ai_world.world.entity import Entity
-from ai_world.world.genome import Genome, mutate, physiology_vector
+from ai_world.world.genome import Genome, crossover, mutate, physiology_vector
 from ai_world.world.params import EcoParams
 from ai_world.world.population import TRAIT_IX, Population
 from ai_world.world.tiles import Tile
@@ -119,7 +119,8 @@ def think_system(world: World) -> None:
 
     pop.i_turn = outputs[:, TURN]                 # tanh node -> -1..1
     pop.i_thrust = outputs[:, THRUST]             # sigmoid node -> 0..1
-    pop.i_eat = outputs[:, EAT] > 0.5
+    # feeding is reflexive: always eat when hungry, or when the brain asks
+    pop.i_eat = (outputs[:, EAT] > 0.5) | (pop.energy < 0.85)
     pop.i_attack = outputs[:, ATTACK] > 0.5
     pop.i_mate = outputs[:, MATE] > 0.5
 
@@ -158,9 +159,10 @@ def act_system(world: World) -> None:
     enzymes.values[ty, tx] = np.maximum(0.0, enzymes.values[ty, tx])
     pop.energy = np.minimum(1.0, pop.energy + taken * traits[:, _IX_META])
 
-    emission = (pop.signature * (0.04 * size)[:, None]).astype(np.float32)  # (n, C)
+    passive = (pop.signature * (0.04 * size)[:, None]).astype(np.float32)  # (n, C)
     for channel in range(spectrum.channels):
-        np.add.at(spectrum.values[channel], (ty, tx), emission[:, channel])
+        np.add.at(spectrum.values[channel], (ty, tx), passive[:, channel])
+    emit_cost = pop.brains.emit(pop, spectrum.values)
 
     temp_here = temperature.values[ty, tx]
     drain = (
@@ -168,10 +170,11 @@ def act_system(world: World) -> None:
         + params.move_cost * speed ** 2
         + thermal_penalty_vec(temp_here, traits, params)
         + np.where(tile == _DEEP_WATER, params.drown_penalty, 0.0)
+        + params.port_upkeep * pop.brains.port_cost
+        + params.brain_node_upkeep * pop.brains.n_nodes
+        + params.brain_conn_upkeep * pop.brains.n_conns
+        + params.emit_cost * emit_cost
     )
-    drain += params.port_upkeep * pop.brains.port_cost
-    drain += params.brain_node_upkeep * pop.brains.n_nodes
-    drain += params.brain_conn_upkeep * pop.brains.n_conns
     pop.energy = np.maximum(0.0, pop.energy - drain)
     pop.age += 1
     pop.last_turn = pop.i_turn.copy()
@@ -224,32 +227,84 @@ def _resolve_attack(pop: Population, i: int, params: EcoParams) -> None:
 
 
 def _reproduce(world: World, pop: Population, params: EcoParams) -> None:
-    ready = np.flatnonzero(pop.i_mate & (pop.energy >= params.repro_threshold))
+    """Sexual reproduction: pair up willing, species-compatible neighbours of a
+    compatible mating type; the child is a NEAT crossover of both, then mutated."""
+    willing = pop.i_mate & (pop.energy >= params.repro_threshold)
+    candidates = np.flatnonzero(willing)
     room = params.population_soft_cap - len(pop)
-    if room <= 0 or ready.size == 0:
+    if room <= 0 or candidates.size < 2:
         return
+
     rng = world.eco_rng
+    registry = world.species
+    mt = pop.mating_type
+    paired: set[int] = set()
     newborns: list[Entity] = []
-    for i in ready[:room]:
+    lo2, hi2 = params.mating_type_lo ** 2, params.mating_type_hi ** 2
+
+    for i in candidates:
         i = int(i)
+        if i in paired or len(newborns) >= room:
+            continue
+        partner = _find_partner(pop, i, willing, paired, mt, lo2, hi2, params.mating_range)
+        if partner is None:
+            continue
+        paired.add(i)
+        paired.add(partner)
+
         pop.energy[i] -= params.repro_cost
-        angle = rng.random() * _TWO_PI
+        pop.energy[partner] -= params.repro_cost
+        a_fitter = pop.energy[i] >= pop.energy[partner]
+        child_genome = mutate(
+            crossover(pop.genomes[i], pop.genomes[partner], rng, a_is_fitter=a_fitter),
+            rng, world.innovations, params,
+        )
+        parent_species = int(pop.species_id[i])
+        cx = 0.5 * (pop.x[i] + pop.x[partner]) + rng.normal(0.0, 1.0)
+        cy = 0.5 * (pop.y[i] + pop.y[partner]) + rng.normal(0.0, 1.0)
         newborns.append(
             Entity(
                 id=pop.new_id(),
-                x=min(max(pop.x[i] + math.cos(angle), 0.0), world.width - 1e-3),
-                y=min(max(pop.y[i] + math.sin(angle), 0.0), world.height - 1e-3),
+                x=min(max(cx, 0.0), world.width - 1e-3),
+                y=min(max(cy, 0.0), world.height - 1e-3),
                 heading=float(rng.random() * _TWO_PI),
-                energy=params.repro_cost,
+                energy=2.0 * params.repro_cost,
                 hp=1.0,
-                genome=mutate(pop.genomes[i], rng, world.innovations, params),
+                genome=child_genome,
                 birth_tick=world.tick,
-                generation=int(pop.generation[i]) + 1,
+                generation=max(int(pop.generation[i]), int(pop.generation[partner])) + 1,
+                species_id=registry.assign(child_genome, world.tick, parent_species),
                 parent_a=int(pop.id[i]),
+                parent_b=int(pop.id[partner]),
             )
         )
     pop.add_many(newborns)
     pop.births += len(newborns)
+
+
+def _find_partner(pop, i, willing, paired, mt, lo2, hi2, reach) -> int | None:
+    best, best_d2 = None, reach * reach
+    my_species = pop.species_id[i]
+    for j in pop.neighbours(pop.x[i], pop.y[i], reach):
+        if j == i or j in paired or not willing[j] or pop.species_id[j] != my_species:
+            continue
+        type_d2 = float(np.sum((mt[i] - mt[j]) ** 2))
+        if not (lo2 < type_d2 < hi2):
+            continue
+        d2 = (pop.x[i] - pop.x[j]) ** 2 + (pop.y[i] - pop.y[j]) ** 2
+        if d2 < best_d2:
+            best, best_d2 = j, d2
+    return best
+
+
+def speciation_system(world: World) -> None:
+    pop = world.population
+    if pop is None or not len(pop):
+        return
+    params = world.eco_params
+    if world.tick % params.speciation_interval != 0:
+        return
+    world.species.recount(pop.species_id, pop.genomes, world.tick)
 
 
 def default_systems() -> list[System]:
@@ -260,4 +315,5 @@ def default_systems() -> list[System]:
         think_system,
         act_system,
         vitals_system,
+        speciation_system,
     ]

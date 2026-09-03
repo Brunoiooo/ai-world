@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from ai_world.config import MAX_MAP_DIM, MIN_MAP_DIM
 from ai_world.persistence.entities import load_population, save_population
+from ai_world.persistence.species import load_species, save_species
 from ai_world.persistence.serialization import (
     deserialize_array,
     deserialize_eco_state,
@@ -47,13 +48,18 @@ def _fmt_dt(value: datetime) -> str:
 def _eco_blobs(world: World) -> tuple[bytes | None, bytes | None, bytes | None]:
     if not world.ecosystem_enabled:
         return None, None, None
-    assert world.enzymes and world.spectrum and world.eco_params
+    assert world.enzymes and world.spectrum and world.eco_params and world.species
     assert world.weather and world.eco_rng is not None and world.innovations is not None
+    species_meta = {
+        "threshold": world.species.threshold,
+        "target": world.species.target_count,
+        "next_id": world.species.next_id,
+    }
     return (
         serialize_array(world.enzymes.values),
         serialize_array(world.spectrum.values),
         serialize_eco_state(
-            world.eco_params, world.weather, world.eco_rng, world.innovations
+            world.eco_params, world.weather, world.eco_rng, world.innovations, species_meta
         ),
     )
 
@@ -61,13 +67,18 @@ def _eco_blobs(world: World) -> tuple[bytes | None, bytes | None, bytes | None]:
 def _restore_ecosystem(conn: sqlite3.Connection, world: World, row: sqlite3.Row) -> None:
     if row["eco_state"] is None:
         return
-    params, weather, rng, innovations = deserialize_eco_state(row["eco_state"])
+    params, weather, rng, innovations, species_meta = deserialize_eco_state(row["eco_state"])
+    registry = load_species(
+        conn, world.id, species_meta["threshold"], species_meta["target"],
+        species_meta["next_id"],
+    )
     rebuild_ecosystem(
         world,
         params,
         weather,
         rng,
         innovations,
+        registry,
         deserialize_array(row["enzymes"]),
         deserialize_array(row["spectrum"]),
         load_population(conn, world.id, params),
@@ -154,6 +165,8 @@ class WorldRepository:
         world.id = int(cur.lastrowid)
         if world.population is not None:
             save_population(self._conn, world.id, world.population)
+        if world.species is not None:
+            save_species(self._conn, world.id, world.species)
         self._conn.commit()
         return world
 
@@ -178,6 +191,8 @@ class WorldRepository:
         )
         if world.population is not None:
             save_population(self._conn, world.id, world.population)
+        if world.species is not None:
+            save_species(self._conn, world.id, world.species)
         self._conn.commit()
 
     def rename(self, world_id: int, name: str) -> None:

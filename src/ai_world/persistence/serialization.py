@@ -121,6 +121,7 @@ def serialize_eco_state(
     weather: WeatherState,
     rng: np.random.Generator,
     innovations: Innovations,
+    species_meta: dict,
 ) -> bytes:
     doc = {
         "version": _ECO_STATE_VERSION,
@@ -128,17 +129,19 @@ def serialize_eco_state(
         "weather": asdict(weather),
         "rng": rng.bit_generator.state,
         "innovations": _pack_innovations(innovations),
+        "species": species_meta,
     }
     return zlib.compress(json.dumps(doc).encode("utf-8"), level=6)
 
 
 def deserialize_eco_state(
     blob: bytes,
-) -> tuple[EcoParams, WeatherState, np.random.Generator, Innovations]:
+) -> tuple[EcoParams, WeatherState, np.random.Generator, Innovations, dict]:
     doc = json.loads(zlib.decompress(blob).decode("utf-8"))
     params = EcoParams(**doc["params"])
     weather = WeatherState(**doc["weather"])
     rng = np.random.default_rng()
     rng.bit_generator.state = doc["rng"]
     innovations = _unpack_innovations(doc["innovations"])
-    return params, weather, rng, innovations
+    species_meta = doc.get("species", {"threshold": 3.0, "target": 12, "next_id": 1})
+    return params, weather, rng, innovations, species_meta

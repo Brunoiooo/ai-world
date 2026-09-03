@@ -64,6 +64,50 @@ class CompiledBrain:
     out_port_slots: np.ndarray  # (m,) int64  positions of OUT-port nodes
 
 
+class _PortColumns:
+    """Accumulates flat port arrays across the population during a rebuild."""
+
+    @dataclass
+    class Frozen:
+        owner: np.ndarray
+        slot: np.ndarray
+        signature: np.ndarray
+        angle: np.ndarray
+        reach: np.ndarray
+        gain: np.ndarray
+
+    def __init__(self, channels: int):
+        self.channels = channels
+        self.owner: list[int] = []
+        self.slot: list[int] = []
+        self.signature: list[np.ndarray] = []
+        self.angle: list[float] = []
+        self.reach: list[float] = []
+        self.gain: list[float] = []
+
+    def add(self, row: int, slot: int, port) -> None:
+        self.owner.append(row)
+        self.slot.append(slot)
+        self.signature.append(port.signature)
+        self.angle.append(port.angle)
+        self.reach.append(port.reach)
+        self.gain.append(port.gain)
+
+    def finish(self) -> "Frozen":
+        sig = (
+            np.array(self.signature, dtype=np.float32)
+            if self.signature else np.zeros((0, self.channels), dtype=np.float32)
+        )
+        return _PortColumns.Frozen(
+            np.array(self.owner, dtype=np.intp),
+            np.array(self.slot, dtype=np.intp),
+            sig,
+            np.array(self.angle, dtype=np.float64),
+            np.array(self.reach, dtype=np.float64),
+            np.array(self.gain, dtype=np.float64),
+        )
+
+
 def _node_order(genome: Genome) -> list[int]:
     in_ports = sorted(n.id for n in genome.nodes if n.kind == "in_port")
     out_ports = sorted(n.id for n in genome.nodes if n.kind == "out_port")
@@ -148,6 +192,9 @@ class BrainStore:
         self.port_cost = np.zeros(0, dtype=np.float64)
         self._compiled: list[CompiledBrain] = []
         self._genomes: list[Genome] = []
+        self._last_state: np.ndarray | None = None
+        self.ports_in = _PortColumns(self.channels).finish()
+        self.ports_out = _PortColumns(self.channels).finish()
 
     def __len__(self) -> int:
         return self._n
@@ -221,26 +268,21 @@ class BrainStore:
         self.port_cost = np.array([c.port_cost for c in self._compiled], dtype=np.float64)
 
     def _rebuild_ports(self) -> None:
-        owners, slots, sigs, ang, arc, reach, gain = [], [], [], [], [], [], []
+        cols_in, cols_out = _PortColumns(self.channels), _PortColumns(self.channels)
         for row, (genome, cb) in enumerate(zip(self._genomes, self._compiled)):
             in_ports = [p for p in genome.ports if p.mode == "in"]
+            out_ports = [p for p in genome.ports if p.mode == "out"]
             for port, slot in zip(in_ports, cb.in_port_slots):
-                owners.append(row)
-                slots.append(int(slot))
-                sigs.append(port.signature)
-                ang.append(port.angle)
-                arc.append(port.arc)
-                reach.append(port.reach)
-                gain.append(port.gain)
-        self.p_owner = np.array(owners, dtype=np.intp)
-        self.p_slot = np.array(slots, dtype=np.intp)
-        self.p_sig = (
-            np.array(sigs, dtype=np.float32)
-            if sigs else np.zeros((0, self.channels), dtype=np.float32)
-        )
-        self.p_angle = np.array(ang, dtype=np.float64)
-        self.p_reach = np.array(reach, dtype=np.float64)
-        self.p_gain = np.array(gain, dtype=np.float64)
+                cols_in.add(row, int(slot), port)
+            for port, slot in zip(out_ports, cb.out_port_slots):
+                cols_out.add(row, int(slot), port)
+        self.ports_in = cols_in.finish()
+        self.ports_out = cols_out.finish()
+
+    # test/introspection helper: how many IN ports across the population
+    @property
+    def p_owner(self) -> np.ndarray:
+        return self.ports_in.owner
 
     # --- per-tick step -------------------------------------------
     def _proprio(self, pop, temp_here: np.ndarray, traits) -> np.ndarray:
@@ -259,27 +301,31 @@ class BrainStore:
         out[:, 8] = 1.0
         return out
 
+    def _sample_wedge(self, ports, pop):
+        """(P, s) world positions + distances sampled along each port's centre ray."""
+        frac = np.linspace(0.6, 1.0, self.samples)[None, :]
+        dist = ports.reach[:, None] * frac
+        theta = pop.heading[ports.owner][:, None] + ports.angle[:, None]
+        sx = pop.x[ports.owner][:, None] + np.cos(theta) * dist
+        sy = pop.y[ports.owner][:, None] + np.sin(theta) * dist
+        return sx, sy, dist
+
     def _sense(self, pop, spectrum_values: np.ndarray) -> np.ndarray:
-        """Returns an (n, G) input contribution with IN-port intensities placed
-        at their node slots (zero elsewhere)."""
         contrib = np.zeros((self._n, self.g), dtype=np.float32)
-        if self.p_owner.size == 0:
+        ports = self.ports_in
+        if ports.owner.size == 0:
             return contrib
         _, h, w = spectrum_values.shape
-        s = self.samples
-        frac = np.linspace(0.6, 1.0, s)[None, :]
-        dist = self.p_reach[:, None] * frac                       # (P, s)
-        theta = pop.heading[self.p_owner][:, None] + self.p_angle[:, None]
-        sx = pop.x[self.p_owner][:, None] + np.cos(theta) * dist
-        sy = pop.y[self.p_owner][:, None] + np.sin(theta) * dist
+        sx, sy, dist = self._sample_wedge(ports, pop)
         ix = np.clip(sx.astype(np.intp), 0, w - 1)
         iy = np.clip(sy.astype(np.intp), 0, h - 1)
-        local = spectrum_values[:, iy, ix]                        # (C, P, s)
-        sig = self.p_sig / (np.linalg.norm(self.p_sig, axis=1, keepdims=True) + 1e-6)
-        dotv = np.einsum("cps,pc->ps", local, sig)                # (P, s)
-        falloff = 1.0 / (1.0 + dist)
-        intensity = np.tanh(self.p_gain * (dotv * falloff).sum(axis=1))  # (P,)
-        contrib[self.p_owner, self.p_slot] = intensity.astype(np.float32)
+        local = spectrum_values[:, iy, ix]                            # (C, P, s)
+        sig = ports.signature / (
+            np.linalg.norm(ports.signature, axis=1, keepdims=True) + 1e-6
+        )
+        dotv = np.einsum("cps,pc->ps", local, sig)                    # (P, s)
+        intensity = np.tanh(ports.gain * (dotv / (1.0 + dist)).sum(axis=1))
+        contrib[ports.owner, ports.slot] = intensity.astype(np.float32)
         return contrib
 
     @torch.inference_mode()
@@ -287,18 +333,37 @@ class BrainStore:
         n = self._n
         if n == 0:
             return np.zeros((0, N_FIXED_OUT), dtype=np.float32)
-        traits = pop.traits
-        proprio = self._proprio(pop, temp_here, traits)
+        proprio = self._proprio(pop, temp_here, pop.traits)
         inputs_np = self._sense(pop, spectrum_values)
         inputs_np[:, :N_PROPRIO] = proprio
 
-        W = self.W[:n]
-        act = self.act[:n]
         mask = self.mask[:n]
         inputs = torch.from_numpy(inputs_np)
         state = torch.where(mask, inputs, self.state[:n])
-        net = torch.bmm(W, state.unsqueeze(-1)).squeeze(-1)
-        nxt = _activate(net, act)
+        net = torch.bmm(self.W[:n], state.unsqueeze(-1)).squeeze(-1)
+        nxt = _activate(net, self.act[:n])
         nxt = torch.where(mask, inputs, nxt)
         self.state[:n] = nxt
+        self._last_state = nxt.numpy()
         return nxt[:, FIXED_OUT_SLICE].numpy().copy()
+
+    def emit(self, pop, spectrum_values: np.ndarray) -> np.ndarray:
+        """Splat each OUT port's ``signature * output`` into the spectrum field
+        along its wedge. Returns the per-organism emission energy cost."""
+        cost = np.zeros(self._n, dtype=np.float64)
+        ports = self.ports_out
+        if ports.owner.size == 0 or self._last_state is None:
+            return cost
+        _, h, w = spectrum_values.shape
+        values = self._last_state[ports.owner, ports.slot]            # (P,)
+        sx, sy, _ = self._sample_wedge(ports, pop)
+        cx = np.clip(sx[:, self.samples // 2].astype(np.intp), 0, w - 1)
+        cy = np.clip(sy[:, self.samples // 2].astype(np.intp), 0, h - 1)
+        emission = (
+            values[:, None] * ports.gain[:, None] * ports.signature
+        ).astype(np.float32)                                          # (P, C)
+        for channel in range(self.channels):
+            np.add.at(spectrum_values[channel], (cy, cx), emission[:, channel])
+        strength = np.abs(values) * ports.gain * ports.reach * ports.reach
+        np.add.at(cost, ports.owner, strength)
+        return cost

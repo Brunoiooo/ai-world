@@ -12,6 +12,7 @@ from ai_world.world.genome import Genome, Innovations
 from ai_world.world.grid import Grid
 from ai_world.world.params import ECOSYSTEM_MAX_DIM, EcoParams
 from ai_world.world.population import Population
+from ai_world.world.species import SpeciesRegistry
 from ai_world.world.tiles import Tile
 from ai_world.world.weather import WeatherState
 
@@ -38,6 +39,7 @@ class World:
     eco_params: EcoParams | None = None
     eco_rng: np.random.Generator | None = None
     innovations: Innovations | None = None
+    species: SpeciesRegistry | None = None
     enzymes: EnzymeField | None = None
     spectrum: SpectrumField | None = None
     temperature: TemperatureField | None = None
@@ -76,6 +78,9 @@ def attach_ecosystem(world: World, params: EcoParams) -> None:
     world.eco_params = params
     world.eco_rng = np.random.default_rng((world.seed ^ _ECO_RNG_SALT) & 0xFFFFFFFF)
     world.innovations = Innovations()
+    world.species = SpeciesRegistry(
+        threshold=params.species_threshold, target_count=params.species_target
+    )
     world.enzymes = EnzymeField.for_grid(world.grid, params, world.eco_rng)
     world.spectrum = SpectrumField.for_grid(world.grid, params)
     world.temperature = TemperatureField.for_grid(world.grid, params, world.seed)
@@ -91,6 +96,7 @@ def rebuild_ecosystem(
     weather: WeatherState,
     rng: np.random.Generator,
     innovations: Innovations,
+    species: SpeciesRegistry,
     enzyme_values: np.ndarray,
     spectrum_values: np.ndarray,
     population: Population,
@@ -99,6 +105,7 @@ def rebuild_ecosystem(
     world.eco_params = params
     world.eco_rng = rng
     world.innovations = innovations
+    world.species = species
     world.weather = weather
     world.enzymes = EnzymeField.rebuild(world.grid, params, enzyme_values)
     world.spectrum = SpectrumField.rebuild(params, spectrum_values)
@@ -130,3 +137,5 @@ def _seed_population(world: World) -> None:
         for row in picks
     ]
     world.population.add_many(newborns)
+    for i, genome in enumerate(world.population.genomes):
+        world.population.species_id[i] = world.species.assign(genome, world.tick)

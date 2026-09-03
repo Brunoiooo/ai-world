@@ -48,6 +48,23 @@ _MIGRATIONS: list[str] = [
         PRIMARY KEY (world_id, id)
     );
     """,
+    # v4 -- speciation
+    """
+    CREATE TABLE species (
+        world_id       INTEGER NOT NULL REFERENCES worlds(id) ON DELETE CASCADE,
+        id             INTEGER NOT NULL,
+        first_tick     INTEGER NOT NULL,
+        parent_id      INTEGER,
+        representative BLOB    NOT NULL,
+        PRIMARY KEY (world_id, id)
+    );
+    CREATE TABLE species_census (
+        world_id   INTEGER NOT NULL REFERENCES worlds(id) ON DELETE CASCADE,
+        tick       INTEGER NOT NULL,
+        species_id INTEGER NOT NULL,
+        count      INTEGER NOT NULL
+    );
+    """,
 ]
 
 

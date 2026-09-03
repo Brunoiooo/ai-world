@@ -99,8 +99,10 @@ def test_eco_state_roundtrip(params):
     rng.random(10)  # advance it
     innov = Innovations(conn={(0, 9): 0, (1, 10): 1}, next_conn=2, next_node=15)
 
-    blob = serialize_eco_state(params, weather, rng, innov)
-    rp, rw, rr, ri = deserialize_eco_state(blob)
+    blob = serialize_eco_state(params, weather, rng, innov,
+                               {"threshold": 4.0, "target": 12, "next_id": 3})
+    rp, rw, rr, ri, meta = deserialize_eco_state(blob)
+    assert meta["next_id"] == 3
 
     assert rp == params
     assert rw == weather

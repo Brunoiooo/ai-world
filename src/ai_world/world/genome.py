@@ -435,3 +435,122 @@ def _mutate_activation(child: Genome, rng: np.random.Generator) -> None:
         mutable[int(rng.integers(len(mutable)))].activation = str(
             rng.choice(_HIDDEN_ACTIVATIONS)
         )
+
+
+# ---------------------------------------------------------------------------
+# sexual reproduction
+# ---------------------------------------------------------------------------
+COMPAT_COEFFS = (1.0, 1.0, 0.4, 0.6, 0.3)  # excess, disjoint, weight, port-sig, physiology
+
+
+def crossover(
+    a: Genome, b: Genome, rng: np.random.Generator, *, a_is_fitter: bool
+) -> Genome:
+    """NEAT crossover: matching genes come from either parent at random, genes
+    only one parent has come from the fitter parent."""
+    fit, other = (a, b) if a_is_fitter else (b, a)
+
+    conns_fit = {c.innov: c for c in fit.conns}
+    conns_other = {c.innov: c for c in other.conns}
+    child_conns: list[ConnGene] = []
+    for innov, cf in conns_fit.items():
+        co = conns_other.get(innov)
+        pick = cf if (co is None or rng.random() < 0.5) else co
+        enabled = pick.enabled if (co is None) else (
+            True if rng.random() < 0.75 else (cf.enabled and co.enabled)
+        )
+        child_conns.append(ConnGene(innov, pick.src, pick.dst, pick.weight, enabled))
+
+    needed = {c.src for c in child_conns} | {c.dst for c in child_conns}
+    nodes_fit = {n.id: n for n in fit.nodes}
+    nodes_other = {n.id: n for n in other.nodes}
+    child_nodes = [replace(nodes_fit[i]) for i in range(N_PROPRIO + N_FIXED_OUT)]
+    for node_id in sorted(needed):
+        if node_id < N_PROPRIO + N_FIXED_OUT:
+            continue
+        source = nodes_fit.get(node_id) or nodes_other.get(node_id)
+        if source is not None:
+            child_nodes.append(replace(source))
+
+    child_node_ids = {n.id for n in child_nodes}
+    ports_other = {p.node_id: p for p in other.ports}
+    child_ports: list[PortGene] = []
+    for port in fit.ports:
+        if port.node_id not in child_node_ids:
+            continue
+        mate = ports_other.get(port.node_id)
+        if mate is None or rng.random() < 0.5:
+            child_ports.append(port.copy())
+        else:
+            child_ports.append(
+                PortGene(
+                    port.node_id, port.mode,
+                    0.5 * (port.signature + mate.signature),
+                    _circ_mean(port.angle, mate.angle),
+                    0.5 * (port.arc + mate.arc),
+                    0.5 * (port.reach + mate.reach),
+                    0.5 * (port.gain + mate.gain),
+                )
+            )
+
+    phys = Physiology(**{
+        name: float(getattr(a.physiology, name) if rng.random() < 0.5
+                    else getattr(b.physiology, name))
+        for name in PHYS_FIELDS
+    })
+    return Genome(
+        physiology=phys,
+        body_signature=(0.5 * (a.body_signature + b.body_signature)).astype(np.float32),
+        mating_type=(0.5 * (a.mating_type + b.mating_type)).astype(np.float32),
+        nodes=child_nodes,
+        conns=child_conns,
+        ports=child_ports,
+    )
+
+
+def _circ_mean(x: float, y: float) -> float:
+    return float(np.arctan2(
+        0.5 * (np.sin(x) + np.sin(y)), 0.5 * (np.cos(x) + np.cos(y))
+    ))
+
+
+def compat_distance(a: Genome, b: Genome, coeffs: tuple = COMPAT_COEFFS) -> float:
+    c_excess, c_disjoint, c_weight, c_port, c_phys = coeffs
+    ia = {c.innov: c for c in a.conns}
+    ib = {c.innov: c for c in b.conns}
+    if ia or ib:
+        max_a = max(ia) if ia else -1
+        max_b = max(ib) if ib else -1
+        boundary = min(max_a, max_b)
+        matching = ia.keys() & ib.keys()
+        weight_diff = (
+            np.mean([abs(ia[k].weight - ib[k].weight) for k in matching])
+            if matching else 0.0
+        )
+        only = (ia.keys() ^ ib.keys())
+        disjoint = sum(1 for k in only if k <= boundary)
+        excess = len(only) - disjoint
+        norm = max(len(ia), len(ib), 1)
+    else:
+        weight_diff = disjoint = excess = 0.0
+        norm = 1
+
+    port_diff = _port_signature_diff(a, b)
+    phys_diff = float(np.linalg.norm(
+        physiology_vector(a.physiology) - physiology_vector(b.physiology)
+    ))
+    return (
+        c_excess * excess / norm
+        + c_disjoint * disjoint / norm
+        + c_weight * weight_diff
+        + c_port * port_diff
+        + c_phys * phys_diff
+    )
+
+
+def _port_signature_diff(a: Genome, b: Genome) -> float:
+    if not a.ports or not b.ports:
+        return float(abs(len(a.ports) - len(b.ports)))
+    sa = np.mean([p.signature for p in a.ports], axis=0)
+    sb = np.mean([p.signature for p in b.ports], axis=0)
+    return float(np.linalg.norm(sa - sb))

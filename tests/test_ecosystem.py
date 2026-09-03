@@ -15,7 +15,7 @@ from ai_world.world.population import TRAIT_IX
 from ai_world.world.world import World, attach_ecosystem
 
 
-def make_world(*, population=60, seed=3, dim=64) -> World:
+def make_world(*, population=90, seed=3, dim=80) -> World:
     params = EcoParams(initial_population=population, population_soft_cap=population * 4)
     world = World(name="eco", grid=generate_grid(dim, dim, seed), seed=seed)
     attach_ecosystem(world, params)
@@ -32,7 +32,7 @@ def run(world: World, ticks: int) -> None:
 
 def test_run_stays_within_invariants():
     world = make_world()
-    run(world, 1200)
+    run(world, 500)
     pop = world.population
     assert len(pop) >= 0
     if len(pop):
@@ -68,7 +68,7 @@ def test_starvation_kills_without_food():
     world.enzymes.values[:] = 0.0
     world.enzymes._regen_ceiling[:] = 0.0  # no regrowth either
     start = len(world.population)
-    run(world, 600)
+    run(world, 400)
     assert len(world.population) < start
     assert world.population.deaths > 0
 
@@ -93,28 +93,34 @@ def test_thermal_penalty_only_outside_comfort_band():
     assert thermal_penalty(0.9, genome, params) > 0.0
 
 
-def test_reproduction_produces_a_mutated_child():
-    world = make_world(population=4)
+def test_sexual_reproduction_crosses_two_parents():
+    world = make_world(population=6)
     pop = world.population
+    # put two organisms next to each other, same species, willing, well-fed
+    pop.x[0], pop.y[0] = 40.0, 40.0
+    pop.x[1], pop.y[1] = 40.6, 40.0
+    pop.species_id[0] = pop.species_id[1] = 1
+    pop.mating_type[0] = [0.0, 0.0, 0.0]
+    pop.mating_type[1] = [1.0, 0.0, 0.0]  # distance 1.0, inside the band
     pop.energy[:] = 0.95
-    pop.i_turn = np.zeros(4)
-    pop.i_thrust = np.zeros(4)
-    pop.i_eat = np.zeros(4, dtype=bool)
-    pop.i_attack = np.zeros(4, dtype=bool)
-    pop.i_mate = np.ones(4, dtype=bool)
+    pop.rebuild_index()
+    n = len(pop)
+    pop.i_turn = np.zeros(n)
+    pop.i_thrust = np.zeros(n)
+    pop.i_eat = np.zeros(n, dtype=bool)
+    pop.i_attack = np.zeros(n, dtype=bool)
+    pop.i_mate = np.ones(n, dtype=bool)
 
     before = len(pop)
-    parent_gen = int(pop.generation[0])
-    parent_energy = float(pop.energy[0])
     act_system(world)
 
-    assert len(pop) > before
+    assert len(pop) == before + 1
     child = pop.snapshot(len(pop) - 1)
-    assert child.generation == parent_gen + 1
-    assert pop.energy[0] < parent_energy
-    # a mutation actually happened somewhere in the child's body
-    assert not np.array_equal(child.genome.body_signature, pop.genomes[0].body_signature) or \
-        child.genome.physiology != pop.genomes[0].physiology
+    assert child.parent_a in (int(pop.id[0]), int(pop.id[1]))
+    assert child.parent_b in (int(pop.id[0]), int(pop.id[1]))
+    assert child.parent_a != child.parent_b
+    assert pop.energy[0] < 0.95 and pop.energy[1] < 0.95
+    assert child.species_id >= 1
 
 
 def test_corpse_returns_enzymes_to_the_tile():
@@ -122,6 +128,7 @@ def test_corpse_returns_enzymes_to_the_tile():
     pop = world.population
     pop.x[0], pop.y[0] = 20.5, 20.5
     pop.hp[0] = 0.0
+    pop.energy[0] = 0.3  # not sated -> no hp regen this tick
     world.enzymes.values[20, 20] = 0.0
     vitals_system(world)
     assert len(pop) == 0

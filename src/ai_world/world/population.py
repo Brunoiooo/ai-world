@@ -42,6 +42,7 @@ class Population:
             setattr(self, name, np.zeros(0, dtype=_COLUMN_DTYPE.get(name, np.float64)))
         self.traits = np.zeros((0, len(PHYS_FIELDS)), dtype=np.float64)
         self._signature = np.zeros((0, 0), dtype=np.float32)
+        self.mating_type = np.zeros((0, 0), dtype=np.float32)
         self.last_turn = np.zeros(0, dtype=np.float64)  # proprioception feedback
         self._sorted_idx = np.zeros(0, dtype=np.intp)
         self._buckets: dict[int, tuple[int, int]] = {}
@@ -80,9 +81,13 @@ class Population:
             [physiology_vector(e.genome.physiology) for e in entities], dtype=np.float64
         )
         sig_rows = np.array([e.genome.body_signature for e in entities], dtype=np.float32)
+        mt_rows = np.array([e.genome.mating_type for e in entities], dtype=np.float32)
         self.traits = np.vstack([self.traits, trait_rows]) if self.traits.size else trait_rows
         self._signature = (
             np.vstack([self._signature, sig_rows]) if self._signature.size else sig_rows
+        )
+        self.mating_type = (
+            np.vstack([self.mating_type, mt_rows]) if self.mating_type.size else mt_rows
         )
         self.last_turn = np.append(self.last_turn, np.zeros(len(entities)))
         self.genomes.extend(e.genome for e in entities)
@@ -108,7 +113,7 @@ class Population:
             arr = getattr(self, name)
             arr[fill] = arr[src]
             setattr(self, name, arr[:n_new])
-        for matrix_name in ("traits", "_signature"):
+        for matrix_name in ("traits", "_signature", "mating_type"):
             m = getattr(self, matrix_name)
             m[fill] = m[src]
             setattr(self, matrix_name, m[:n_new])
@@ -124,6 +129,7 @@ class Population:
         """Re-cache the trait row + signature for organism ``i`` after a genome edit."""
         self.traits[i] = physiology_vector(self.genomes[i].physiology)
         self._signature[i] = self.genomes[i].body_signature
+        self.mating_type[i] = self.genomes[i].mating_type
 
     # --- snapshots (boundary use only) -----------------------------
     def snapshot(self, i: int) -> Entity:
