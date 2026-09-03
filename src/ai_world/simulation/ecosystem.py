@@ -323,7 +323,7 @@ def speciation_system(world: World) -> None:
     params = world.eco_params
     if world.tick % params.speciation_interval != 0:
         return
-    world.species.recount(pop.species_id, pop.genomes, world.tick)
+    world.species.recount(pop.species_id, pop.genomes, world.tick, pop.traits)
 
 
 def default_systems() -> list[System]:

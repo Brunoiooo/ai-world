@@ -11,6 +11,7 @@ from ai_world.ui.entity_renderer import EntityRenderer
 from ai_world.ui.field_overlay import FieldOverlay
 from ai_world.ui.renderer import GridRenderer
 from ai_world.ui.screens.base import Screen
+from ai_world.ui.species_panel import SpeciesPanel
 from ai_world.ui.widgets import Button
 from ai_world.world.fields import TemperatureField
 from ai_world.world.tiles import TILE_NAMES
@@ -35,6 +36,7 @@ class SimulationScreen(Screen):
         self._selected_id: int | None = None
         self._show_entities = True
         self._show_species = False
+        self.species_panel = SpeciesPanel()
         self._dragging = False
         self._menu_open = False
         self._status = ""
@@ -101,6 +103,9 @@ class SimulationScreen(Screen):
                 button.handle_event(event)
             return
 
+        if self.species_panel.handle_event(event, self.app.surface):
+            return
+
         if event.type == pygame.KEYDOWN:
             self._handle_key(event.key, event.mod)
         elif event.type == pygame.MOUSEWHEEL:
@@ -140,6 +145,8 @@ class SimulationScreen(Screen):
             self._show_entities = not self._show_entities
         elif key == pygame.K_TAB:
             self._show_species = not self._show_species
+        elif key == pygame.K_g:
+            self.species_panel.toggle()
         elif key == pygame.K_e:
             self.overlay.toggle("enzymes")
         elif key == pygame.K_t:
@@ -175,6 +182,8 @@ class SimulationScreen(Screen):
         self._draw_inspector(surface)
         if self._show_species:
             self._draw_species_panel(surface)
+        if self.species_panel.open:
+            self.species_panel.draw(surface, self.world, self.app.fonts)
         if self._menu_open:
             self._draw_menu(surface)
 
@@ -323,7 +332,7 @@ class SimulationScreen(Screen):
         if self.world.ecosystem_enabled:
             overlay = self.overlay.label or "off"
             text += (f"   |   E/T/1-6: overlay ({overlay})   H: organisms   "
-                     f"Tab: species   click: inspect")
+                     f"Tab: species   G: species lab   click: inspect")
         rendered = self.app.fonts.get(14).render(text, True, theme.TEXT_DIM)
         bar = pygame.Rect(0, h - 26, w, 26)
         pygame.draw.rect(surface, theme.PANEL, bar)

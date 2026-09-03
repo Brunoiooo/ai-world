@@ -3,9 +3,16 @@ import numpy as np
 from ai_world.persistence.database import connect, init_db
 from ai_world.persistence.worlds import WorldRepository
 from ai_world.simulation.ecosystem import default_systems
-from ai_world.world.genome import Genome, Innovations, crossover, compat_distance, mutate
+from ai_world.world.genome import (
+    Genome,
+    Innovations,
+    compat_distance,
+    crossover,
+    mutate,
+    physiology_vector,
+)
 from ai_world.world.params import EcoParams
-from ai_world.world.species import SpeciesRegistry
+from ai_world.world.species import TRAIT_CHANNELS, SpeciesRegistry
 
 PARAMS = EcoParams()
 
@@ -55,6 +62,31 @@ def test_registry_splits_and_prunes():
     assert reg.census[-1][0] == 10
 
 
+def test_registry_records_trait_history():
+    reg = SpeciesRegistry(threshold=0.5, target_count=3)
+    genomes = [_blind(s) for s in range(30)]
+    ids = np.array([reg.assign(g, tick=0) for g in genomes])
+    traits = np.vstack([physiology_vector(g.physiology) for g in genomes])
+
+    reg.recount(ids, genomes, tick=25, traits=traits)
+
+    tick, means = reg.trait_history[-1]
+    assert tick == 25
+    assert set(means) == set(int(s) for s in np.unique(ids))
+    for sid, vec in means.items():
+        assert vec.shape == (len(TRAIT_CHANNELS),)
+        expected_phys = traits[ids == sid].mean(axis=0)
+        assert np.allclose(vec[: traits.shape[1]], expected_phys, atol=1e-5)
+
+
+def test_recount_without_traits_leaves_history_empty():
+    reg = SpeciesRegistry(threshold=0.5, target_count=3)
+    genomes = [_blind(s) for s in range(10)]
+    ids = np.array([reg.assign(g, tick=0) for g in genomes])
+    reg.recount(ids, genomes, tick=10)
+    assert reg.trait_history == []
+
+
 def test_speciation_survives_save_load():
     conn = connect(":memory:")
     init_db(conn)
@@ -69,10 +101,18 @@ def test_speciation_survives_save_load():
 
     n_species = len(world.species.species)
     n_census = len(world.species.census)
+    n_traits = len(world.species.trait_history)
+    sample_tick, sample_means = world.species.trait_history[-1]
+    sample_sid = next(iter(sample_means))
     repo.save(world)
 
     reloaded = repo.load(world.id)
     assert len(reloaded.species.species) == n_species
     assert len(reloaded.species.census) == n_census
     assert reloaded.species.threshold == world.species.threshold
+
+    assert len(reloaded.species.trait_history) == n_traits
+    r_tick, r_means = reloaded.species.trait_history[-1]
+    assert r_tick == sample_tick
+    assert np.allclose(r_means[sample_sid], sample_means[sample_sid], atol=1e-4)
     conn.close()

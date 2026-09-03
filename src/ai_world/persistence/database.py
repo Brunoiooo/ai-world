@@ -65,6 +65,15 @@ _MIGRATIONS: list[str] = [
         count      INTEGER NOT NULL
     );
     """,
+    # v5 -- per-species mean trait vectors over time (evolution tracking)
+    """
+    CREATE TABLE species_traits (
+        world_id   INTEGER NOT NULL REFERENCES worlds(id) ON DELETE CASCADE,
+        tick       INTEGER NOT NULL,
+        species_id INTEGER NOT NULL,
+        traits     BLOB    NOT NULL
+    );
+    """,
 ]
 
 

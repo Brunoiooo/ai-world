@@ -78,7 +78,7 @@ PHYS_FIELDS: tuple[str, ...] = (
     "attack_power", "armor", "hp_regen_rate", "mutation_rate", "senescence_rate",
 )
 
-_PHYS_BOUNDS: dict[str, tuple[float, float]] = {
+PHYS_BOUNDS: dict[str, tuple[float, float]] = {
     "max_speed": (0.05, 3.0),
     "size": (0.3, 4.0),
     "metabolic_efficiency": (0.2, 2.0),
@@ -326,7 +326,7 @@ def mutate(
 
 
 def _mutate_physiology(child: Genome, rng: np.random.Generator, scale: float) -> None:
-    for name, (lo, hi) in _PHYS_BOUNDS.items():
+    for name, (lo, hi) in PHYS_BOUNDS.items():
         current = getattr(child.physiology, name)
         step = rng.normal(0.0, 0.06 * (hi - lo) * scale)
         setattr(child.physiology, name, float(np.clip(current + step, lo, hi)))

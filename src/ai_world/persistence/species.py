@@ -3,7 +3,12 @@ from __future__ import annotations
 
 import sqlite3
 
-from ai_world.persistence.serialization import deserialize_genome, serialize_genome
+from ai_world.persistence.serialization import (
+    deserialize_array,
+    deserialize_genome,
+    serialize_array,
+    serialize_genome,
+)
 from ai_world.world.species import Species, SpeciesRegistry
 
 
@@ -25,6 +30,15 @@ def save_species(conn: sqlite3.Connection, world_id: int, registry: SpeciesRegis
             (world_id, tick, sid, count)
             for tick, counts in registry.census
             for sid, count in counts.items()
+        ],
+    )
+    conn.execute("DELETE FROM species_traits WHERE world_id = ?", (world_id,))
+    conn.executemany(
+        "INSERT INTO species_traits (world_id, tick, species_id, traits) VALUES (?, ?, ?, ?)",
+        [
+            (world_id, tick, sid, serialize_array(vec))
+            for tick, means in registry.trait_history
+            for sid, vec in means.items()
         ],
     )
 
@@ -51,4 +65,12 @@ def load_species(
     ):
         grouped.setdefault(row["tick"], {})[row["species_id"]] = row["count"]
     registry.census = [(tick, counts) for tick, counts in grouped.items()]
+
+    traits: dict = {}
+    for row in conn.execute(
+        "SELECT tick, species_id, traits FROM species_traits WHERE world_id = ? ORDER BY tick",
+        (world_id,),
+    ):
+        traits.setdefault(row["tick"], {})[row["species_id"]] = deserialize_array(row["traits"])
+    registry.trait_history = [(tick, means) for tick, means in traits.items()]
     return registry
