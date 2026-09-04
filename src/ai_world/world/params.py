@@ -28,6 +28,10 @@ class EcoParams:
     # --- food field (multi-channel: see ai_world.world.food.FOOD_TYPES) ----
     food_capacity: float = 1.0
     food_growth_rate: float = 0.02     # logistic rate: existing patches expand
+    food_growth_chance: float = 0.2    # per-tile, per-tick odds that growth actually
+                                       # lands; when it does it's scaled by 1/chance so
+                                       # the long-run average matches food_growth_rate,
+                                       # but tick-to-tick it looks patchy, not a smooth ramp
     food_seed_rate: float = 0.0006     # trickle onto barren fertile tiles so a
                                        # grazed-out biome can be recolonised
     food_decay: float = 0.004          # global leak toward zero per tick (grown types)

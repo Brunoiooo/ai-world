@@ -89,13 +89,18 @@ class FoodRenderer:
             if not len(xs):
                 continue
             per = counts[k][ys, xs]
-            # thin the tile list before expanding so the work stays bounded
-            if per.sum() > per_channel:
-                stride = int(per.sum() // per_channel) + 1
-                xs, ys, per = xs[::stride], ys[::stride], per[::stride]
-
             tx = (xs + x0).astype(np.int64)
             ty = (ys + y0).astype(np.int64)
+            # thin the tile list before expanding so the work stays bounded.
+            # Keyed by absolute tile coords (not array position) so the kept
+            # set is stable frame to frame -- a positional stride here would
+            # remap wholesale whenever any tile elsewhere gains/loses a speck,
+            # making the whole layer appear to jump around each tick.
+            total = int(per.sum())
+            if total > per_channel:
+                keep_frac = per_channel / total
+                keep = _hash01(tx, ty, k * 97 + 11) < keep_frac
+                tx, ty, per = tx[keep], ty[keep], per[keep]
             rep_x = np.repeat(tx, per)
             rep_y = np.repeat(ty, per)
             ordinal = np.arange(rep_x.size) - np.repeat(np.cumsum(per) - per, per)

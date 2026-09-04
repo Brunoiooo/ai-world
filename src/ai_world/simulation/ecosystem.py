@@ -172,7 +172,8 @@ def weather_system(world: World) -> None:
 def fields_system(world: World) -> None:
     params = world.eco_params
     assert params and world.food and world.spectrum and world.temperature and world.weather
-    world.food.step(world.weather.regen_multiplier)
+    assert world.eco_rng is not None
+    world.food.step(world.weather.regen_multiplier, rng=world.eco_rng)
     # Signal decay/diffusion is slow on a watchable timescale — stepping it on a
     # stride (with a matching rate bump inside the field) keeps the look while
     # halving the per-tick field cost.

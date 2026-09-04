@@ -99,7 +99,8 @@ class FoodField:
     """
 
     __slots__ = (
-        "values", "_ceiling", "_grow", "_seed", "_decay", "_diffusion", "_capacity",
+        "values", "_ceiling", "_grow", "_growth_chance", "_seed", "_decay",
+        "_diffusion", "_capacity",
     )
 
     def __init__(
@@ -108,6 +109,7 @@ class FoodField:
         ceiling: np.ndarray,
         *,
         growth_rate: float,
+        growth_chance: float = 1.0,
         seed_rate: float,
         decay: np.ndarray,
         diffusion: float,
@@ -116,6 +118,7 @@ class FoodField:
         self.values = np.ascontiguousarray(values, dtype=np.float32)
         self._ceiling = np.ascontiguousarray(ceiling, dtype=np.float32)
         self._grow = growth_rate
+        self._growth_chance = growth_chance
         self._seed = seed_rate
         self._decay = np.asarray(decay, dtype=np.float32)[:, None, None]
         self._diffusion = diffusion
@@ -151,17 +154,27 @@ class FoodField:
             values,
             ceiling,
             growth_rate=params.food_growth_rate,
+            growth_chance=params.food_growth_chance,
             seed_rate=params.food_seed_rate,
             decay=decay,
             diffusion=params.food_diffusion,
             capacity=params.food_capacity,
         )
 
-    def step(self, regen_multiplier: float = 1.0) -> None:
+    def step(
+        self, regen_multiplier: float = 1.0, rng: np.random.Generator | None = None
+    ) -> None:
         headroom = self._ceiling - self.values
         logistic = self._grow * self.values * np.maximum(headroom, 0.0) / max(self._capacity, 1e-6)
         seed = self._seed * (self._ceiling > 0.0)
-        self.values += regen_multiplier * (logistic + seed)
+        growth = logistic + seed
+        if rng is not None and self._growth_chance < 1.0:
+            # Growth lands on a tile only with some probability each tick, scaled
+            # up by 1/chance when it does -- same long-run average as applying it
+            # every tick, but patchy/bursty tick-to-tick instead of a smooth ramp.
+            lucky = rng.random(growth.shape, dtype=np.float32) < self._growth_chance
+            growth = np.where(lucky, growth / self._growth_chance, 0.0)
+        self.values += regen_multiplier * growth
         self.values -= self._decay * self.values
         for plane in self.values:
             _diffuse(plane, self._diffusion)
