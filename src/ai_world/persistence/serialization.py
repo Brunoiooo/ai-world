@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import struct
 import zlib
-from dataclasses import asdict
+from dataclasses import asdict, fields
 
 import numpy as np
 
@@ -140,7 +140,8 @@ def deserialize_eco_state(
     doc = json.loads(zlib.decompress(blob).decode("utf-8"))
     params_doc = dict(doc["params"])
     params_doc["climate_event_ticks"] = tuple(params_doc["climate_event_ticks"])
-    params = EcoParams(**params_doc)
+    known = {f.name for f in fields(EcoParams)}
+    params = EcoParams(**{k: v for k, v in params_doc.items() if k in known})
     weather = WeatherState(**doc["weather"])
     rng = np.random.default_rng()
     rng.bit_generator.state = doc["rng"]

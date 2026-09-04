@@ -137,8 +137,9 @@ def think_system(world: World) -> None:
 
     pop.i_turn = outputs[:, TURN]                 # tanh node -> -1..1
     pop.i_thrust = outputs[:, THRUST]             # sigmoid node -> 0..1
-    # feeding is reflexive: always eat when hungry, or when the brain asks
-    pop.i_eat = (outputs[:, EAT] > 0.5) | (pop.energy < 0.85)
+    # every action is a brain decision -- no reflexes. An organism that never
+    # learns to fire `eat` starves; one that never fires `mate` leaves no line.
+    pop.i_eat = outputs[:, EAT] > 0.5
     pop.i_attack = outputs[:, ATTACK] > 0.5
     pop.i_mate = outputs[:, MATE] > 0.5
 
@@ -196,6 +197,7 @@ def act_system(world: World) -> None:
     pop.energy = np.maximum(0.0, pop.energy - drain)
     pop.age += 1
     pop.last_turn = pop.i_turn.copy()
+    np.subtract(pop.repro_cd, 1, out=pop.repro_cd, where=pop.repro_cd > 0)
 
     for i in np.flatnonzero(pop.i_attack):
         _resolve_attack(pop, int(i), params)
@@ -248,7 +250,10 @@ def _resolve_attack(pop: Population, i: int, params: EcoParams) -> None:
 def _reproduce(world: World, pop: Population, params: EcoParams) -> None:
     """Sexual reproduction: pair up willing, species-compatible neighbours of a
     compatible mating type; the child is a NEAT crossover of both, then mutated."""
-    willing = pop.i_mate & (pop.energy >= params.repro_threshold)
+    # the gates are physical, not decisions: a parent must hold at least the
+    # energy it hands to the child, and must be off its post-mating cooldown.
+    # When to mate (within those limits) is entirely the brain's call.
+    willing = pop.i_mate & (pop.energy >= params.repro_cost) & (pop.repro_cd <= 0)
     candidates = np.flatnonzero(willing)
     room = params.population_soft_cap - len(pop)
     if room <= 0 or candidates.size < 2:
@@ -273,6 +278,7 @@ def _reproduce(world: World, pop: Population, params: EcoParams) -> None:
 
         pop.energy[i] -= params.repro_cost
         pop.energy[partner] -= params.repro_cost
+        pop.repro_cd[i] = pop.repro_cd[partner] = params.repro_cooldown
         a_fitter = pop.energy[i] >= pop.energy[partner]
         child_genome = mutate(
             crossover(pop.genomes[i], pop.genomes[partner], rng, a_is_fitter=a_fitter),
@@ -287,7 +293,7 @@ def _reproduce(world: World, pop: Population, params: EcoParams) -> None:
                 x=min(max(cx, 0.0), world.width - 1e-3),
                 y=min(max(cy, 0.0), world.height - 1e-3),
                 heading=float(rng.random() * _TWO_PI),
-                energy=2.0 * params.repro_cost,
+                energy=1.5 * params.repro_cost,  # < 2x: reproduction is slightly lossy
                 hp=1.0,
                 genome=child_genome,
                 birth_tick=world.tick,

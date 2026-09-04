@@ -27,10 +27,12 @@ class EcoParams:
 
     # --- enzyme (food) field -----------------------------------------
     enzyme_capacity: float = 1.0
-    enzyme_regen_rate: float = 0.010  # pull toward the per-tile ceiling per tick
+    enzyme_regen_rate: float = 0.0012  # pull toward the per-tile ceiling per tick;
+                                       # sets the world's food throughput -> carrying capacity
     enzyme_decay: float = 0.006       # global leak toward zero per tick
     enzyme_diffusion: float = 0.012
-    enzyme_initial_fill: float = 0.5
+    enzyme_initial_fill: float = 0.35  # a modest starting surplus cushions the first
+                                       # generations while foraging behaviour evolves
 
     # --- spectrum field --------------------------------------------------
     spectrum_decay: float = 0.16
@@ -47,7 +49,7 @@ class EcoParams:
 
     # --- population ----------------------------------------------------
     initial_population: int = 500
-    population_soft_cap: int = 900    # a safety ceiling; scarce food is the real limit
+    population_soft_cap: int = 6000   # far-off safety net; food scarcity sets the real equilibrium
     spawn_energy: float = 0.55
 
     # --- brain --------------------------------------------------------
@@ -69,7 +71,7 @@ class EcoParams:
     emit_cost: float = 0.003
 
     # --- feeding / vitals --------------------------------------------
-    eat_rate: float = 0.06               # max enzyme absorbed per tick
+    eat_rate: float = 0.03               # max enzyme absorbed per tick
     sated_energy: float = 0.7            # at/above this, hp regenerates
     hp_decay_starving: float = 0.02      # hp lost per tick while energy == 0
     thermal_penalty: float = 0.020       # energy/tick per unit of temperature outside the comfort band
@@ -89,9 +91,13 @@ class EcoParams:
     aging_hp_floor: float = 0.0         # the max-hp ceiling never drops below this
 
     # --- reproduction (sexual) --------------------------------------
-    repro_threshold: float = 0.85        # only well-fed organisms can mate
-    repro_cost: float = 0.34             # energy each parent contributes to the offspring
-    mating_range: float = 6.0            # tiles within which a partner can be found
+    repro_cost: float = 0.5              # energy each parent contributes to the offspring
+                                         # (also the only gate: a parent needs at least this much,
+                                         # so mating leaves it near-empty -- a natural rate limit)
+    repro_cooldown: int = 800           # ticks before an organism can mate again (bounds
+                                         # population growth so food supply can track it)
+    mating_range: float = 10.0           # tiles within which a partner can be found
+                                         # (wide enough that a sparse population can recover)
     mating_type_lo: float = 0.15         # partners must differ by more than this
     mating_type_hi: float = 4.0          # ...and less than this (same broad type)
     species_threshold: float = 8.0       # initial compatibility distance (starts as ~1 species)

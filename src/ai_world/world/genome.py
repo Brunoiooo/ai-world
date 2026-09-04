@@ -213,7 +213,14 @@ class Genome:
         cls, rng: np.random.Generator, params: EcoParams, innov: Innovations
     ) -> "Genome":
         """A minimal starting organism: a body, a wired-but-uninformed brain,
-        and at most one random port. Perception has to evolve from here."""
+        and at most one random port. Perception has to evolve from here.
+
+        The brain also gets two guaranteed seed connections ``bias -> eat`` and
+        ``bias -> mate`` with random (possibly negative) weights. These are not
+        reflexes -- feeding and mating fire *only* from the brain -- they just
+        give a blind organism a non-zero chance of trying either, so evolution
+        has something to select on. Mutation can strengthen, invert, rewire or
+        bury them under learned control like any other gene."""
         c = params.spectrum_channels
         nodes = _fixed_nodes()
         ports: list[PortGene] = []
@@ -235,6 +242,13 @@ class Genome:
             src = int(rng.choice(inputs))
             dst = int(rng.choice(outputs))
             _connect(genome, src, dst, float(rng.normal(0.0, 1.2)), innov)
+
+        bias = PROPRIO_INPUTS.index("bias")
+        for name in ("eat", "mate"):
+            # mildly positive mean so most seed organisms at least try; still
+            # often negative, and free for mutation to flip either way.
+            _connect(genome, bias, N_PROPRIO + FIXED_OUTPUTS.index(name),
+                     float(rng.normal(0.5, 1.0)), innov)
         return genome
 
 

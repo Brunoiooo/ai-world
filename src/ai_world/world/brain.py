@@ -163,6 +163,7 @@ class Brain(torch.nn.Module):
         clamped = torch.where(self.input_mask, inputs, state)
         nxt = _activate(self.W @ clamped, self.act_ids)
         nxt = torch.where(self.input_mask, inputs, nxt)
+        nxt = torch.nan_to_num(nxt, nan=0.0, posinf=8.0, neginf=-8.0).clamp_(-8.0, 8.0)
         return nxt, nxt[FIXED_OUT_SLICE]
 
 
@@ -343,6 +344,9 @@ class BrainStore:
         net = torch.bmm(self.W[:n], state.unsqueeze(-1)).squeeze(-1)
         nxt = _activate(net, self.act[:n])
         nxt = torch.where(mask, inputs, nxt)
+        # unbounded activations (identity/relu/abs) in the recurrent loop can
+        # diverge to inf/NaN; keep the carried state finite and bounded.
+        nxt = torch.nan_to_num(nxt, nan=0.0, posinf=8.0, neginf=-8.0).clamp_(-8.0, 8.0)
         self.state[:n] = nxt
         self._last_state = nxt.numpy()
         return nxt[:, FIXED_OUT_SLICE].numpy().copy()

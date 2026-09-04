@@ -145,7 +145,7 @@ def test_sexual_reproduction_crosses_two_parents():
     pop.species_id[0] = pop.species_id[1] = 1
     pop.mating_type[0] = [0.0, 0.0, 0.0]
     pop.mating_type[1] = [1.0, 0.0, 0.0]  # distance 1.0, inside the band
-    pop.energy[:] = 1.0  # full: one tick of upkeep still leaves them above repro_threshold
+    pop.energy[:] = 1.0  # full: one tick of upkeep still leaves them above repro_cost
     pop.rebuild_index()
     n = len(pop)
     pop.i_turn = np.zeros(n)

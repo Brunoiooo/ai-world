@@ -44,6 +44,7 @@ class Population:
         self._signature = np.zeros((0, 0), dtype=np.float32)
         self.mating_type = np.zeros((0, 0), dtype=np.float32)
         self.last_turn = np.zeros(0, dtype=np.float64)  # proprioception feedback
+        self.repro_cd = np.zeros(0, dtype=np.int64)     # ticks until this organism can mate again
         self._sorted_idx = np.zeros(0, dtype=np.intp)
         self._buckets: dict[int, tuple[int, int]] = {}
 
@@ -90,6 +91,7 @@ class Population:
             np.vstack([self.mating_type, mt_rows]) if self.mating_type.size else mt_rows
         )
         self.last_turn = np.append(self.last_turn, np.zeros(len(entities)))
+        self.repro_cd = np.append(self.repro_cd, np.zeros(len(entities), dtype=np.int64))
         self.genomes.extend(e.genome for e in entities)
         if self.brains is not None:
             self.brains.append([e.genome for e in entities])
@@ -119,6 +121,8 @@ class Population:
             setattr(self, matrix_name, m[:n_new])
         self.last_turn[fill] = self.last_turn[src]
         self.last_turn = self.last_turn[:n_new]
+        self.repro_cd[fill] = self.repro_cd[src]
+        self.repro_cd = self.repro_cd[:n_new]
         for dst, source in zip(fill, src):
             self.genomes[dst] = self.genomes[source]
         del self.genomes[n_new:]
