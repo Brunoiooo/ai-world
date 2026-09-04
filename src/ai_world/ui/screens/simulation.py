@@ -9,11 +9,13 @@ from ai_world.ui import theme
 from ai_world.ui.camera import Camera
 from ai_world.ui.entity_renderer import EntityRenderer
 from ai_world.ui.field_overlay import FieldOverlay
+from ai_world.ui.food_renderer import FoodRenderer
 from ai_world.ui.renderer import GridRenderer
 from ai_world.ui.screens.base import Screen
 from ai_world.ui.species_panel import SpeciesPanel
 from ai_world.ui.widgets import Button
 from ai_world.world.fields import TemperatureField
+from ai_world.world.food import FOOD_NAMES
 from ai_world.world.tiles import TILE_NAMES
 
 _TOP_BAR = 60
@@ -32,9 +34,11 @@ class SimulationScreen(Screen):
         self.camera = Camera(self.world.width, self.world.height, self.app.surface.get_size())
         self.renderer = GridRenderer(self.world.grid)
         self.overlay = FieldOverlay()
+        self.food_renderer = FoodRenderer()
         self.entities = EntityRenderer()
         self._selected_id: int | None = None
         self._show_entities = True
+        self._show_food = True
         self._show_species = False
         self.species_panel = SpeciesPanel()
         self._dragging = False
@@ -147,8 +151,8 @@ class SimulationScreen(Screen):
             self._show_species = not self._show_species
         elif key == pygame.K_g:
             self.species_panel.toggle()
-        elif key == pygame.K_e:
-            self.overlay.toggle("enzymes")
+        elif key == pygame.K_c:
+            self._show_food = not self._show_food
         elif key == pygame.K_t:
             self.overlay.toggle("temperature")
         elif pygame.K_1 <= key <= pygame.K_6:
@@ -174,6 +178,8 @@ class SimulationScreen(Screen):
     # --- drawing ------------------------------------------------
     def draw(self, surface: pygame.Surface) -> None:
         self.renderer.draw(surface, self.camera)
+        if self._show_food:
+            self.food_renderer.draw(surface, self.camera, self.world)
         self.overlay.draw(surface, self.camera, self.world)
         if self._show_entities:
             self.entities.draw(surface, self.camera, self.world)
@@ -244,6 +250,9 @@ class SimulationScreen(Screen):
             f"   senescence {ph.senescence_rate:.2f}",
             f"comfort {ph.comfort_center:.2f} ± {ph.comfort_width:.2f}   mut {ph.mutation_rate:.2f}",
             f"attack {ph.attack_power:.2f}   armor {ph.armor:.2f}",
+            "diet " + "  ".join(
+                f"{n[:4]} {v:+.1f}" for n, v in zip(FOOD_NAMES, g.diet)
+            ),
             f"brain: {g.node_count} nodes · {g.enabled_conn_count} conns · "
             f"ports {in_ports}in/{out_ports}out",
         ]
@@ -318,10 +327,12 @@ class SimulationScreen(Screen):
                 label = f"({tx}, {ty}) {TILE_NAMES.get(tile, '?')}"
                 if self.world.ecosystem_enabled:
                     temp = self.world.temperature.at(tx, ty)
-                    enzyme = float(self.world.enzymes.values[ty, tx])
+                    column = self.world.food.values[:, ty, tx]
+                    top = int(column.argmax())
                     label += (
                         f"   {TemperatureField.to_celsius(temp):.0f}°C"
-                        f"   enzyme {enzyme:.2f}"
+                        f"   food {float(column.sum()):.2f}"
+                        f" ({FOOD_NAMES[top]} {float(column[top]):.2f})"
                     )
                 surface.blit(small.render(label, True, theme.TEXT_DIM), (w // 2 - 120, 34))
 
@@ -331,8 +342,9 @@ class SimulationScreen(Screen):
                 "F: fit   F5: save   Esc: menu")
         if self.world.ecosystem_enabled:
             overlay = self.overlay.label or "off"
-            text += (f"   |   E/T/1-6: overlay ({overlay})   H: organisms   "
-                     f"Tab: species   G: species lab   click: inspect")
+            food = "on" if self._show_food else "off"
+            text += (f"   |   C: food ({food})   T/1-6: overlay ({overlay})   "
+                     f"H: organisms   Tab: species   G: species lab   click: inspect")
         rendered = self.app.fonts.get(14).render(text, True, theme.TEXT_DIM)
         bar = pygame.Rect(0, h - 26, w, 26)
         pygame.draw.rect(surface, theme.PANEL, bar)

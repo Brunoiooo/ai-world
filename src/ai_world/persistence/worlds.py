@@ -48,7 +48,7 @@ def _fmt_dt(value: datetime) -> str:
 def _eco_blobs(world: World) -> tuple[bytes | None, bytes | None, bytes | None]:
     if not world.ecosystem_enabled:
         return None, None, None
-    assert world.enzymes and world.spectrum and world.eco_params and world.species
+    assert world.food and world.spectrum and world.eco_params and world.species
     assert world.weather and world.eco_rng is not None and world.innovations is not None
     species_meta = {
         "threshold": world.species.threshold,
@@ -56,7 +56,7 @@ def _eco_blobs(world: World) -> tuple[bytes | None, bytes | None, bytes | None]:
         "next_id": world.species.next_id,
     }
     return (
-        serialize_array(world.enzymes.values),
+        serialize_array(world.food.values),
         serialize_array(world.spectrum.values),
         serialize_eco_state(
             world.eco_params, world.weather, world.eco_rng, world.innovations, species_meta
@@ -79,7 +79,7 @@ def _restore_ecosystem(conn: sqlite3.Connection, world: World, row: sqlite3.Row)
         rng,
         innovations,
         registry,
-        deserialize_array(row["enzymes"]),
+        deserialize_array(row["food"]),
         deserialize_array(row["spectrum"]),
         load_population(conn, world.id, params),
     )
@@ -142,11 +142,11 @@ class WorldRepository:
         if ecosystem and ecosystem_fits(width, height):
             attach_ecosystem(world, EcoParams())
 
-        enzymes, spectrum, eco_state = _eco_blobs(world)
+        food, spectrum, eco_state = _eco_blobs(world)
         cur = self._conn.execute(
             "INSERT INTO worlds "
             "(name, width, height, seed, tick, created_at, updated_at, grid, "
-            " enzymes, spectrum, eco_state) "
+            " food, spectrum, eco_state) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 world.name,
@@ -157,7 +157,7 @@ class WorldRepository:
                 _fmt_dt(world.created_at),
                 _fmt_dt(world.updated_at),
                 serialize_grid(grid),
-                enzymes,
+                food,
                 spectrum,
                 eco_state,
             ),
@@ -174,16 +174,16 @@ class WorldRepository:
         if world.id is None:
             raise ValueError("world has no id — use create()")
         world.touch()
-        enzymes, spectrum, eco_state = _eco_blobs(world)
+        food, spectrum, eco_state = _eco_blobs(world)
         self._conn.execute(
             "UPDATE worlds SET name = ?, tick = ?, updated_at = ?, grid = ?, "
-            "enzymes = ?, spectrum = ?, eco_state = ? WHERE id = ?",
+            "food = ?, spectrum = ?, eco_state = ? WHERE id = ?",
             (
                 world.name,
                 world.tick,
                 _fmt_dt(world.updated_at),
                 serialize_grid(world.grid),
-                enzymes,
+                food,
                 spectrum,
                 eco_state,
                 world.id,

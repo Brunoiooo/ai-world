@@ -2,19 +2,27 @@ import numpy as np
 import torch
 
 from ai_world.world.brain import Brain, BrainStore, compile_genome
+from ai_world.world.food import N_FOOD_TYPES
 from ai_world.world.genome import (
     ConnGene,
+    FIRST_DYNAMIC_NODE,
     Genome,
     Innovations,
     N_FIXED_OUT,
+    N_PROPRIO,
     NodeGene,
     Physiology,
+    PROPRIO_INPUTS,
     _fixed_nodes,
 )
 from ai_world.world.params import EcoParams
 
 PARAMS = EcoParams()
-G = PARAMS.brain_max_nodes
+G = PARAMS.brain_initial_width
+
+
+def _food_here(n: int) -> np.ndarray:
+    return np.zeros((n, N_FOOD_TYPES), dtype=np.float32)
 
 
 def _genomes(count: int, seed: int = 0) -> list[Genome]:
@@ -54,22 +62,25 @@ def test_brain_forward_shape_and_no_grad():
 
 
 def test_brain_carries_recurrent_state():
-    # bare genome: proprio+outputs, plus one hidden node (id 14) with a self-loop
+    bias = PROPRIO_INPUTS.index("bias")
+    turn = N_PROPRIO  # first fixed output
+    hid = FIRST_DYNAMIC_NODE
+    # bare genome: proprio+outputs, plus one hidden node with a self-loop
     genome = Genome(
         physiology=Physiology.random(np.random.default_rng(0)),
         body_signature=np.zeros(PARAMS.spectrum_channels, np.float32),
         mating_type=np.zeros(3, np.float32),
-        nodes=_fixed_nodes() + [NodeGene(14, "hidden", "tanh")],
+        nodes=_fixed_nodes() + [NodeGene(hid, "hidden", "tanh")],
         conns=[
-            ConnGene(900, 8, 14, 0.6, True),    # bias -> hidden
-            ConnGene(901, 14, 14, 0.9, True),   # hidden -> hidden (recurrent)
-            ConnGene(902, 14, 9, 1.0, True),    # hidden -> turn output
+            ConnGene(900, bias, hid, 0.6, True),   # bias -> hidden
+            ConnGene(901, hid, hid, 0.9, True),    # hidden -> hidden (recurrent)
+            ConnGene(902, hid, turn, 1.0, True),   # hidden -> turn output
         ],
     )
     brain = Brain(compile_genome(genome, G))
     state = brain.initial_state()
     inputs = torch.zeros(G)
-    inputs[8] = 1.0  # bias
+    inputs[bias] = 1.0
 
     states = [state.clone()]
     for _ in range(3):
@@ -87,7 +98,7 @@ def test_brainstore_step_and_compact():
     pop = _FakePop(20)
     spectrum = np.random.default_rng(0).random((PARAMS.spectrum_channels, 40, 40)).astype(np.float32)
     temp = np.full(20, 0.5)
-    out = store.step(pop, spectrum, temp)
+    out = store.step(pop, spectrum, temp, _food_here(20))
     assert out.shape == (20, N_FIXED_OUT)
     assert np.isfinite(out).all()
 
@@ -99,8 +110,39 @@ def test_brainstore_step_and_compact():
     store.compact(fill, src, 17)
     assert len(store) == 17
     pop2 = _FakePop(17)
-    out2 = store.step(pop2, spectrum, np.full(17, 0.5))
+    out2 = store.step(pop2, spectrum, np.full(17, 0.5), _food_here(17))
     assert out2.shape == (17, N_FIXED_OUT)
+
+
+def test_brainstore_widens_G_for_oversized_brains():
+    # a genome with far more nodes than brain_initial_width must still compile
+    # and run -- BrainStore grows the padded node dimension on demand.
+    big_n = G + 40
+    hidden = [NodeGene(FIRST_DYNAMIC_NODE + k, "hidden", "tanh") for k in range(big_n)]
+    conns = [
+        ConnGene(1000 + k, PROPRIO_INPUTS.index("bias"), h.id, 0.05, True)
+        for k, h in enumerate(hidden)
+    ]
+    genome = Genome(
+        physiology=Physiology.random(np.random.default_rng(0)),
+        body_signature=np.zeros(PARAMS.spectrum_channels, np.float32),
+        mating_type=np.zeros(3, np.float32),
+        nodes=_fixed_nodes() + hidden,
+        conns=conns,
+    )
+    assert genome.node_count > G
+
+    store = BrainStore(PARAMS)
+    store.append(_genomes(3, seed=1))       # a few normal-sized brains first
+    store.append([genome])                  # ...then the oversized one
+    assert store.g >= genome.node_count
+    assert len(store) == 4
+
+    pop = _FakePop(4)
+    spectrum = np.zeros((PARAMS.spectrum_channels, 30, 30), dtype=np.float32)
+    out = store.step(pop, spectrum, np.full(4, 0.5), _food_here(4))
+    assert out.shape == (4, N_FIXED_OUT)
+    assert np.isfinite(out).all()
 
 
 def test_brainstore_step_is_deterministic():
@@ -111,7 +153,7 @@ def test_brainstore_step_is_deterministic():
     pop = _FakePop(15)
     spectrum = np.zeros((PARAMS.spectrum_channels, 30, 30), dtype=np.float32)
     temp = np.full(15, 0.5)
-    assert np.allclose(a.step(pop, spectrum, temp), b.step(pop, spectrum, temp))
+    assert np.allclose(a.step(pop, spectrum, temp, _food_here(15)), b.step(pop, spectrum, temp, _food_here(15)))
 
 
 class _FakePop:

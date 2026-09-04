@@ -1,8 +1,9 @@
 """Optional colour overlays for the ecosystem's continuous fields.
 
-Draws one field (enzymes, temperature or a single spectrum channel) as a
-translucent layer on top of the terrain, using the same "small base surface,
-scaled visible slice" approach as :class:`ai_world.ui.renderer.GridRenderer`.
+Draws one field (temperature or a single spectrum channel) as a translucent
+layer on top of the terrain, using the same "small base surface, scaled visible
+slice" approach as :class:`ai_world.ui.renderer.GridRenderer`. Food has its own
+always-on layer (:mod:`ai_world.ui.food_renderer`).
 """
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ def _diverging(t: np.ndarray) -> np.ndarray:
 
 class FieldOverlay:
     def __init__(self) -> None:
-        # None, "enzymes", "temperature", or ("spectrum", channel_index)
+        # None, "temperature", or ("spectrum", channel_index)
         self._mode: object = None
 
     @property
@@ -45,8 +46,6 @@ class FieldOverlay:
 
     def _plane(self, world: World) -> np.ndarray | None:
         mode = self._mode
-        if mode == "enzymes":
-            return world.enzymes.values  # type: ignore[union-attr]
         if mode == "temperature":
             return world.temperature.values  # type: ignore[union-attr]
         if isinstance(mode, tuple) and mode[0] == "spectrum":
@@ -59,8 +58,6 @@ class FieldOverlay:
     def _rgb(self, plane: np.ndarray) -> np.ndarray:
         if self._mode == "temperature":
             return _diverging(np.clip(plane, 0.0, 1.0))
-        if self._mode == "enzymes":
-            return _ramp(np.clip(plane, 0.0, 1.0), (20, 30, 20), (90, 230, 110))
         norm = plane / max(float(plane.max()), 1e-4)
         return _ramp(np.clip(norm, 0.0, 1.0), (20, 20, 30), (230, 120, 240))
 

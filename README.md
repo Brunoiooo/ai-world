@@ -26,7 +26,8 @@ python -m ai_world                       # or: python run.py
 | `F`                        | fit the view to the whole map             |
 | left click                 | inspect the organism under the cursor     |
 | `H`                        | show / hide organisms                     |
-| `E` `T` `1`–`6`            | overlay the enzyme / temperature / signal-channel field |
+| `C`                        | show / hide the food layer (on by default) |
+| `T` `1`–`6`                | overlay the temperature / signal-channel field |
 | `Tab`                      | species panel (count + share bar)         |
 | `F5` / `Ctrl+S`            | save · `Esc` pause menu                    |
 
@@ -38,15 +39,18 @@ ticks-per-second actually achieved. The ecosystem runs only for maps up to
 
 **Fields.** Three continuous layers sit over the tiles:
 
-* *enzymes* — the food resource. Regrows on fertile terrain (grass, forest),
-  is eaten locally and decays, so it forms shifting patches. Corpses deposit
-  enzymes back onto the tile.
+* *food* — six channels (`ai_world.world.food.FOOD_TYPES`), drawn on the map by
+  default. Four grow on their own biome (grass forage, forest mast, humus,
+  algae), expanding logistically and diffusing so they form shifting patches;
+  two are produced by the organisms — *enzyme* (excreted while feeding) and
+  *carrion* (left on death). Each organism has a genetic `diet` weight per
+  channel: high digests well, negative makes that type toxic.
 * *temperature* — latitude + altitude + terrain, modulated by a seasonal cycle,
   drifting weather fronts, and rare climate events (cold snaps, heat waves,
   blooms, droughts).
-* *spectrum* — six decaying, diffusing signal channels. The enzyme
-  concentration and temperature occupy two of them; organisms radiate a body
-  signature into the rest and can actively emit on them.
+* *spectrum* — six decaying, diffusing signal channels. Total food density and
+  temperature occupy two of them; organisms radiate a body signature into the
+  rest and can actively emit on them.
 
 **Organisms.** Each has `energy` and `hp` in `[0, 1]` (`hp` falls when `energy`
 hits zero, recovers while well fed), plus a genome of:
@@ -60,10 +64,11 @@ hits zero, recovers while well fed), plus a genome of:
   matches its signature along its wedge; an OUT port radiates
   `signature × output` back into the spectrum.
 * *brain* — an arbitrary-topology recurrent network (NEAT-style: nodes and
-  connections with historical markings). Fixed outputs are turn, thrust (chosen
-  per tick, capped by `max_speed`), eat, attack and mate; extra outputs drive
-  the OUT ports. The whole population's brains run as one batched `torch`
-  matrix multiply each tick.
+  connections with historical markings). Fixed inputs include one "food here"
+  sense per food type; fixed outputs are turn, thrust (capped by `max_speed`),
+  attack, mate and one eat gate per food type; extra outputs drive the OUT
+  ports. The whole population's brains run as one batched `torch` matrix
+  multiply each tick.
 
 **Evolution.** When two well-fed, species-compatible organisms of a compatible
 mating type meet, they produce one offspring by NEAT crossover, then mutation.
@@ -81,7 +86,8 @@ src/ai_world/
 │   ├── tiles.py         tile types + palette
 │   ├── grid.py          numpy uint8 array (cells[y, x])
 │   ├── generator.py     deterministic terrain from value noise
-│   ├── fields.py        EnzymeField / TemperatureField / SpectrumField
+│   ├── fields.py        FoodField / TemperatureField / SpectrumField
+│   ├── food.py          the food-type registry (biome-grown + organism-derived)
 │   ├── weather.py       season phase, drifting fronts, climate events
 │   ├── genome.py        physiology + ports + NEAT graph; mutate / crossover / compat
 │   ├── brain.py         genome → padded weight matrix; BrainStore (batched torch)
@@ -101,7 +107,7 @@ src/ai_world/
 │   ├── species.py       species + census rows
 │   └── worlds.py        WorldRepository: list / create / load / save / delete
 └── ui/                  pygame layer only
-    ├── camera.py · renderer.py · field_overlay.py · entity_renderer.py
+    ├── camera.py · renderer.py · food_renderer.py · field_overlay.py · entity_renderer.py
     └── screens/         menu → create / browser → simulation
 ```
 

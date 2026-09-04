@@ -13,6 +13,7 @@ import numpy as np
 
 from ai_world.world.brain import BrainStore
 from ai_world.world.entity import Entity
+from ai_world.world.food import N_FOOD_TYPES
 from ai_world.world.genome import PHYS_FIELDS, Genome, physiology_vector
 from ai_world.world.params import EcoParams
 
@@ -43,6 +44,7 @@ class Population:
         self.traits = np.zeros((0, len(PHYS_FIELDS)), dtype=np.float64)
         self._signature = np.zeros((0, 0), dtype=np.float32)
         self.mating_type = np.zeros((0, 0), dtype=np.float32)
+        self.diet = np.zeros((0, N_FOOD_TYPES), dtype=np.float32)  # per-food-type digestion
         self.last_turn = np.zeros(0, dtype=np.float64)  # proprioception feedback
         self.repro_cd = np.zeros(0, dtype=np.int64)     # ticks until this organism can mate again
         self._sorted_idx = np.zeros(0, dtype=np.intp)
@@ -51,7 +53,7 @@ class Population:
         # transient per-tick decisions, (re)written wholesale by the think system
         self.i_turn = np.zeros(0, dtype=np.float64)
         self.i_thrust = np.zeros(0, dtype=np.float64)
-        self.i_eat = np.zeros(0, dtype=bool)
+        self.i_eat = np.zeros((0, N_FOOD_TYPES), dtype=bool)  # one feeding gate per food type
         self.i_attack = np.zeros(0, dtype=bool)
         self.i_mate = np.zeros(0, dtype=bool)
 
@@ -83,6 +85,7 @@ class Population:
         )
         sig_rows = np.array([e.genome.body_signature for e in entities], dtype=np.float32)
         mt_rows = np.array([e.genome.mating_type for e in entities], dtype=np.float32)
+        diet_rows = np.array([e.genome.diet for e in entities], dtype=np.float32)
         self.traits = np.vstack([self.traits, trait_rows]) if self.traits.size else trait_rows
         self._signature = (
             np.vstack([self._signature, sig_rows]) if self._signature.size else sig_rows
@@ -90,6 +93,7 @@ class Population:
         self.mating_type = (
             np.vstack([self.mating_type, mt_rows]) if self.mating_type.size else mt_rows
         )
+        self.diet = np.vstack([self.diet, diet_rows]) if self.diet.size else diet_rows
         self.last_turn = np.append(self.last_turn, np.zeros(len(entities)))
         self.repro_cd = np.append(self.repro_cd, np.zeros(len(entities), dtype=np.int64))
         self.genomes.extend(e.genome for e in entities)
@@ -115,7 +119,7 @@ class Population:
             arr = getattr(self, name)
             arr[fill] = arr[src]
             setattr(self, name, arr[:n_new])
-        for matrix_name in ("traits", "_signature", "mating_type"):
+        for matrix_name in ("traits", "_signature", "mating_type", "diet"):
             m = getattr(self, matrix_name)
             m[fill] = m[src]
             setattr(self, matrix_name, m[:n_new])
@@ -134,6 +138,7 @@ class Population:
         self.traits[i] = physiology_vector(self.genomes[i].physiology)
         self._signature[i] = self.genomes[i].body_signature
         self.mating_type[i] = self.genomes[i].mating_type
+        self.diet[i] = self.genomes[i].diet
 
     # --- snapshots (boundary use only) -----------------------------
     def snapshot(self, i: int) -> Entity:

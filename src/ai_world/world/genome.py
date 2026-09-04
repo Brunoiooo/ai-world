@@ -20,19 +20,25 @@ from dataclasses import dataclass, field, replace
 
 import numpy as np
 
+from ai_world.world.food import N_FOOD_TYPES
 from ai_world.world.params import EcoParams
 
 MATING_TYPE_DIM = 3
 
 # --- fixed brain nodes (stable ids across every genome) -------------------
+# "food_k" senses food type k on the organism's own tile; "eat_k" is that type's
+# feeding gate. Both blocks track ai_world.world.food.FOOD_TYPES.
 PROPRIO_INPUTS = (
     "energy", "hunger", "hp", "age", "speed", "last_turn", "oscillator",
-    "thermal", "bias",
+    "thermal", "bias", *(f"food_{k}" for k in range(N_FOOD_TYPES)),
 )
-FIXED_OUTPUTS = ("turn", "thrust", "eat", "attack", "mate")
-N_PROPRIO = len(PROPRIO_INPUTS)          # 9  -> node ids 0..8
-N_FIXED_OUT = len(FIXED_OUTPUTS)         # 5  -> node ids 9..13
-FIRST_DYNAMIC_NODE = N_PROPRIO + N_FIXED_OUT  # 14
+FIXED_OUTPUTS = (
+    "turn", "thrust", "attack", "mate", *(f"eat_{k}" for k in range(N_FOOD_TYPES)),
+)
+N_PROPRIO = len(PROPRIO_INPUTS)          # 9 + N_FOOD_TYPES -> node ids 0..14
+N_FIXED_OUT = len(FIXED_OUTPUTS)         # 4 + N_FOOD_TYPES -> node ids 15..24
+FIRST_DYNAMIC_NODE = N_PROPRIO + N_FIXED_OUT  # 25
+EAT_OUTPUT_BASE = 4                      # index of eat_0 within FIXED_OUTPUTS
 
 ACTIVATIONS = ("identity", "tanh", "sigmoid", "relu", "sin", "gauss", "abs")
 _HIDDEN_ACTIVATIONS = ("tanh", "sigmoid", "relu", "sin", "gauss", "abs")
@@ -78,17 +84,31 @@ PHYS_FIELDS: tuple[str, ...] = (
     "attack_power", "armor", "hp_regen_rate", "mutation_rate", "senescence_rate",
 )
 
+# Lower bounds are real physical floors (a non-positive size / speed / width is
+# nonsensical and breaks the maths). Upper bounds are deliberately far out of
+# reach -- there is no design ceiling on a trait, only the energy cost of
+# carrying it. `comfort_center` / `comfort_width` stay in 0..1 because they are
+# fractions of the normalized temperature range.
 PHYS_BOUNDS: dict[str, tuple[float, float]] = {
-    "max_speed": (0.05, 3.0),
-    "size": (0.3, 4.0),
-    "metabolic_efficiency": (0.2, 2.0),
+    "max_speed": (0.05, 100.0),
+    "size": (0.3, 100.0),
+    "metabolic_efficiency": (0.2, 50.0),
     "comfort_center": (0.0, 1.0),
-    "comfort_width": (0.03, 0.7),
-    "attack_power": (0.0, 2.0),
-    "armor": (0.0, 1.0),
-    "hp_regen_rate": (0.0, 0.08),
-    "mutation_rate": (0.02, 3.0),
-    "senescence_rate": (0.0, 3.0),
+    "comfort_width": (0.03, 1.0),
+    "attack_power": (0.0, 100.0),
+    "armor": (0.0, 100.0),
+    "hp_regen_rate": (0.0, 5.0),
+    "mutation_rate": (0.02, 50.0),
+    "senescence_rate": (0.0, 50.0),
+}
+
+# Per-trait mutation step size, so widening the bounds above does not turn every
+# mutation into a wild jump. Was ``0.06 * (hi - lo)`` before the bounds opened up.
+_PHYS_STEP: dict[str, float] = {
+    "max_speed": 0.18, "size": 0.22, "metabolic_efficiency": 0.11,
+    "comfort_center": 0.06, "comfort_width": 0.04, "attack_power": 0.12,
+    "armor": 0.06, "hp_regen_rate": 0.005, "mutation_rate": 0.18,
+    "senescence_rate": 0.18,
 }
 
 
@@ -168,11 +188,19 @@ class Innovations:
 # ---------------------------------------------------------------------------
 # genome
 # ---------------------------------------------------------------------------
+def _zero_diet() -> np.ndarray:
+    return np.zeros(N_FOOD_TYPES, dtype=np.float32)
+
+
 @dataclass
 class Genome:
     physiology: Physiology
     body_signature: np.ndarray
     mating_type: np.ndarray
+    # digestion adaptation, one weight per ai_world.world.food.FOOD_TYPES entry:
+    # high -> nourishing, negative -> toxic. Defaulted so bare test constructors
+    # (physiology + two vectors) still work.
+    diet: np.ndarray = field(default_factory=_zero_diet)
     nodes: list[NodeGene] = field(default_factory=list)
     conns: list[ConnGene] = field(default_factory=list)
     ports: list[PortGene] = field(default_factory=list)
@@ -203,6 +231,7 @@ class Genome:
             physiology=replace(self.physiology),
             body_signature=self.body_signature.copy(),
             mating_type=self.mating_type.copy(),
+            diet=self.diet.copy(),
             nodes=[replace(n) for n in self.nodes],
             conns=[replace(c) for c in self.conns],
             ports=[p.copy() for p in self.ports],
@@ -215,12 +244,16 @@ class Genome:
         """A minimal starting organism: a body, a wired-but-uninformed brain,
         and at most one random port. Perception has to evolve from here.
 
-        The brain also gets two guaranteed seed connections ``bias -> eat`` and
-        ``bias -> mate`` with random (possibly negative) weights. These are not
-        reflexes -- feeding and mating fire *only* from the brain -- they just
-        give a blind organism a non-zero chance of trying either, so evolution
-        has something to select on. Mutation can strengthen, invert, rewire or
-        bury them under learned control like any other gene."""
+        The brain also gets guaranteed seed connections ``bias -> eat_k`` (one per
+        food type) and ``bias -> mate`` with random (possibly negative) weights.
+        These are not reflexes -- feeding and mating fire *only* from the brain --
+        they just give a blind organism a non-zero chance of trying either, so
+        evolution has something to select on. Mutation can strengthen, invert,
+        rewire or bury them under learned control like any other gene.
+
+        ``diet`` starts near-neutral: most food types are weakly digestible and a
+        few are mildly toxic, so a blind organism can scrape by somewhere but must
+        evolve a real specialisation to thrive."""
         c = params.spectrum_channels
         nodes = _fixed_nodes()
         ports: list[PortGene] = []
@@ -228,6 +261,7 @@ class Genome:
             physiology=Physiology.random(rng),
             body_signature=(rng.random(c) * 0.6).astype(np.float32),
             mating_type=rng.normal(0.0, 1.0, MATING_TYPE_DIM).astype(np.float32),
+            diet=rng.normal(0.15, 0.35, N_FOOD_TYPES).astype(np.float32),
             nodes=nodes,
             conns=[],
             ports=ports,
@@ -244,7 +278,8 @@ class Genome:
             _connect(genome, src, dst, float(rng.normal(0.0, 1.2)), innov)
 
         bias = PROPRIO_INPUTS.index("bias")
-        for name in ("eat", "mate"):
+        seed_outputs = [n for n in FIXED_OUTPUTS if n.startswith("eat_")] + ["mate"]
+        for name in seed_outputs:
             # mildly positive mean so most seed organisms at least try; still
             # often negative, and free for mutation to flip either way.
             _connect(genome, bias, N_PROPRIO + FIXED_OUTPUTS.index(name),
@@ -257,7 +292,8 @@ class Genome:
 # ---------------------------------------------------------------------------
 def _fixed_nodes() -> list[NodeGene]:
     nodes = [NodeGene(i, "proprio", "identity") for i in range(N_PROPRIO)]
-    defaults = ("tanh", "sigmoid", "sigmoid", "sigmoid", "sigmoid")
+    # turn is bipolar (tanh); thrust, mate, attack and every eat gate are 0..1.
+    defaults = ("tanh", "sigmoid", "sigmoid", "sigmoid") + ("sigmoid",) * N_FOOD_TYPES
     nodes += [
         NodeGene(N_PROPRIO + i, "fixed_out", defaults[i]) for i in range(N_FIXED_OUT)
     ]
@@ -320,11 +356,11 @@ def mutate(
 
     if rng.random() < 0.16 * scale:
         _mutate_add_connection(child, rng, innov)
-    if rng.random() < 0.06 * scale and child.node_count < params.brain_max_nodes:
+    if rng.random() < 0.06 * scale:  # no node cap -- BrainStore widens G on demand
         _mutate_add_node(child, rng, innov)
     if rng.random() < 0.05 * scale:
         _mutate_toggle_connection(child, rng)
-    if rng.random() < 0.05 * scale and child.node_count < params.brain_max_nodes:
+    if rng.random() < 0.05 * scale:
         _add_port(child, rng, params, innov,
                   mode="in" if rng.random() < 0.6 else "out")
         _wire_new_port(child, rng, innov)
@@ -342,7 +378,7 @@ def mutate(
 def _mutate_physiology(child: Genome, rng: np.random.Generator, scale: float) -> None:
     for name, (lo, hi) in PHYS_BOUNDS.items():
         current = getattr(child.physiology, name)
-        step = rng.normal(0.0, 0.06 * (hi - lo) * scale)
+        step = rng.normal(0.0, _PHYS_STEP[name] * scale)
         setattr(child.physiology, name, float(np.clip(current + step, lo, hi)))
 
 
@@ -354,6 +390,11 @@ def _mutate_signatures(child: Genome, rng: np.random.Generator, scale: float) ->
     child.mating_type = (
         child.mating_type + rng.normal(0.0, 0.08 * scale, child.mating_type.shape)
     ).astype(np.float32)
+    diet = child.diet + rng.normal(0.0, 0.06 * scale, child.diet.shape)
+    if rng.random() < 0.1 * scale:  # rare larger kick: room to switch niches
+        k = int(rng.integers(child.diet.shape[0]))
+        diet[k] += float(rng.normal(0.0, 0.6))
+    child.diet = np.clip(diet, -1.5, 1.5).astype(np.float32)
 
 
 def _mutate_weights(child: Genome, rng: np.random.Generator, scale: float) -> None:
@@ -430,8 +471,10 @@ def _mutate_port_params(child: Genome, rng: np.random.Generator, scale: float) -
     ).astype(np.float32)
     port.angle = float((port.angle + rng.normal(0.0, 0.3 * scale) + np.pi) % (2 * np.pi) - np.pi)
     port.arc = float(np.clip(port.arc + rng.normal(0.0, 0.2 * scale), 0.15, np.pi))
-    port.reach = float(np.clip(port.reach + rng.normal(0.0, 1.0 * scale), 1.0, 24.0))
-    port.gain = float(np.clip(port.gain + rng.normal(0.0, 0.2 * scale), 0.1, 4.0))
+    # reach / gain have no design ceiling -- a huge sense just costs a lot of
+    # energy (port_upkeep scales with gain * reach^2) and ages the body faster.
+    port.reach = float(np.clip(port.reach + rng.normal(0.0, 1.0 * scale), 1.0, 500.0))
+    port.gain = float(np.clip(port.gain + rng.normal(0.0, 0.2 * scale), 0.1, 100.0))
 
 
 def _mutate_flip_port(child: Genome, rng: np.random.Generator) -> None:
@@ -454,7 +497,8 @@ def _mutate_activation(child: Genome, rng: np.random.Generator) -> None:
 # ---------------------------------------------------------------------------
 # sexual reproduction
 # ---------------------------------------------------------------------------
-COMPAT_COEFFS = (1.0, 1.0, 0.4, 0.6, 0.3)  # excess, disjoint, weight, port-sig, physiology
+# excess, disjoint, weight, port-sig, physiology, diet
+COMPAT_COEFFS = (1.0, 1.0, 0.4, 0.6, 0.3, 0.5)
 
 
 def crossover(
@@ -516,6 +560,7 @@ def crossover(
         physiology=phys,
         body_signature=(0.5 * (a.body_signature + b.body_signature)).astype(np.float32),
         mating_type=(0.5 * (a.mating_type + b.mating_type)).astype(np.float32),
+        diet=(0.5 * (a.diet + b.diet)).astype(np.float32),
         nodes=child_nodes,
         conns=child_conns,
         ports=child_ports,
@@ -529,7 +574,7 @@ def _circ_mean(x: float, y: float) -> float:
 
 
 def compat_distance(a: Genome, b: Genome, coeffs: tuple = COMPAT_COEFFS) -> float:
-    c_excess, c_disjoint, c_weight, c_port, c_phys = coeffs
+    c_excess, c_disjoint, c_weight, c_port, c_phys, c_diet = coeffs
     ia = {c.innov: c for c in a.conns}
     ib = {c.innov: c for c in b.conns}
     if ia or ib:
@@ -553,12 +598,14 @@ def compat_distance(a: Genome, b: Genome, coeffs: tuple = COMPAT_COEFFS) -> floa
     phys_diff = float(np.linalg.norm(
         physiology_vector(a.physiology) - physiology_vector(b.physiology)
     ))
+    diet_diff = float(np.linalg.norm(a.diet - b.diet))
     return (
         c_excess * excess / norm
         + c_disjoint * disjoint / norm
         + c_weight * weight_diff
         + c_port * port_diff
         + c_phys * phys_diff
+        + c_diet * diet_diff
     )
 
 

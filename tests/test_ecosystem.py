@@ -9,15 +9,16 @@ from ai_world.simulation.ecosystem import (
     thermal_penalty,
     vitals_system,
 )
+from ai_world.world.food import CARRION_IX, N_FOOD_TYPES
 from ai_world.world.generator import generate_grid
-from ai_world.world.genome import Genome, Physiology
+from ai_world.world.genome import Genome, Physiology, physiology_vector
 from ai_world.world.params import EcoParams
 from ai_world.world.population import TRAIT_IX
 from ai_world.world.world import World, attach_ecosystem
 
 
 def make_world(*, population=90, seed=3, dim=80) -> World:
-    params = EcoParams(initial_population=population, population_soft_cap=population * 4)
+    params = EcoParams(initial_population=population)
     world = World(name="eco", grid=generate_grid(dim, dim, seed), seed=seed)
     attach_ecosystem(world, params)
     return world
@@ -37,7 +38,7 @@ def test_run_stays_within_invariants():
     pop = world.population
     assert len(pop) >= 0
     if len(pop):
-        assert pop.energy.min() >= 0.0 and pop.energy.max() <= 1.0
+        assert pop.energy.min() >= 0.0  # no upper cap on the energy reserve
         assert pop.hp.min() >= 0.0 and pop.hp.max() <= 1.0
         assert pop.x.min() >= 0.0 and pop.x.max() < world.width
         assert pop.y.min() >= 0.0 and pop.y.max() < world.height
@@ -58,6 +59,7 @@ def test_hp_drops_only_while_starving_and_regens_when_sated():
     pop = world.population
     pop.energy[:] = [0.0, 0.4, 0.95]
     pop.hp[:] = 0.5
+    pop.traits[:, TRAIT_IX["hp_regen_rate"]] = 0.02  # don't lean on the random draw
     vitals_system(world)
     assert pop.hp[0] < 0.5          # starving -> decays
     assert pop.hp[1] == pytest.approx(0.5)  # neither starving nor sated -> flat
@@ -87,6 +89,22 @@ def test_senescence_rate_steepens_aging():
     assert max_hp(fast, params, 15_000) < max_hp(slow, params, 15_000)
 
 
+def test_heavy_metabolic_load_ages_faster():
+    from ai_world.simulation.ecosystem import max_hp_vec
+
+    params = EcoParams()
+    traits = physiology_vector(
+        Physiology(max_speed=0.6, size=1.0, metabolic_efficiency=0.8,
+                   comfort_center=0.5, comfort_width=0.25, attack_power=0.2,
+                   armor=0.2, hp_regen_rate=0.01, mutation_rate=0.5,
+                   senescence_rate=0.0)
+    )[None, :]
+    age = np.array([12_000.0])
+    lean = max_hp_vec(traits, params, age, n_nodes=25, n_conns=11, port_cost=0.0)[0]
+    heavy = max_hp_vec(traits, params, age, n_nodes=400, n_conns=1500, port_cost=200.0)[0]
+    assert heavy < lean  # same body + age, but the expensive brain wears out sooner
+
+
 def test_aging_speed_zero_keeps_bodies_immortal():
     params = EcoParams(aging_speed=0.0)
     genome = Genome(Physiology.random(np.random.default_rng(2)),
@@ -108,8 +126,8 @@ def test_old_well_fed_organism_still_dies_of_old_age():
 
 def test_starvation_kills_without_food():
     world = make_world(population=40)
-    world.enzymes.values[:] = 0.0
-    world.enzymes._regen_ceiling[:] = 0.0  # no regrowth either
+    world.food.values[:] = 0.0
+    world.food._ceiling[:] = 0.0  # no regrowth either
     start = len(world.population)
     run(world, 400)
     assert len(world.population) < start
@@ -150,7 +168,7 @@ def test_sexual_reproduction_crosses_two_parents():
     n = len(pop)
     pop.i_turn = np.zeros(n)
     pop.i_thrust = np.zeros(n)
-    pop.i_eat = np.zeros(n, dtype=bool)
+    pop.i_eat = np.zeros((n, N_FOOD_TYPES), dtype=bool)
     pop.i_attack = np.zeros(n, dtype=bool)
     pop.i_mate = np.ones(n, dtype=bool)
 
@@ -166,16 +184,80 @@ def test_sexual_reproduction_crosses_two_parents():
     assert child.species_id >= 1
 
 
-def test_corpse_returns_enzymes_to_the_tile():
+def test_corpse_leaves_carrion_on_the_tile():
     world = make_world(population=1)
     pop = world.population
     pop.x[0], pop.y[0] = 20.5, 20.5
     pop.hp[0] = 0.0
     pop.energy[0] = 0.3  # not sated -> no hp regen this tick
-    world.enzymes.values[20, 20] = 0.0
+    world.food.values[CARRION_IX, 20, 20] = 0.0
     vitals_system(world)
     assert len(pop) == 0
-    assert world.enzymes.values[20, 20] > 0.0
+    assert world.food.values[CARRION_IX, 20, 20] > 0.0
+
+
+def _grass_tile(world):
+    from ai_world.world.tiles import Tile
+
+    ys, xs = np.where(world.grid.cells == int(Tile.GRASS))
+    return int(xs[0]), int(ys[0])
+
+
+def _grass_food_ix():
+    from ai_world.world.food import FOOD_TYPES
+    from ai_world.world.tiles import Tile
+
+    return next(i for i, f in enumerate(FOOD_TYPES) if f.terrain == int(Tile.GRASS))
+
+
+def _feed_once(world, diet_value):
+    """Park one organism on a grass tile, force it to fire only the grass eat
+    gate, run act_system once, return (d_energy, d_hp)."""
+    pop = world.population
+    k = _grass_food_ix()
+    tx, ty = _grass_tile(world)
+    pop.x[0], pop.y[0] = tx + 0.5, ty + 0.5
+    pop.energy[0], pop.hp[0] = 0.4, 0.9
+    pop.diet[0] = 0.0
+    pop.diet[0, k] = diet_value
+    world.food.values[:, ty, tx] = 0.0
+    world.food.values[k, ty, tx] = 1.0
+
+    n = len(pop)
+    pop.i_turn = np.zeros(n)
+    pop.i_thrust = np.zeros(n)
+    pop.i_attack = np.zeros(n, dtype=bool)
+    pop.i_mate = np.zeros(n, dtype=bool)
+    pop.i_eat = np.zeros((n, N_FOOD_TYPES), dtype=bool)
+    pop.i_eat[0, k] = True
+    pop.rebuild_index()
+
+    e0, h0 = pop.energy[0], pop.hp[0]
+    act_system(world)
+    return pop.energy[0] - e0, pop.hp[0] - h0
+
+
+def test_adapted_diet_feeds_mismatched_diet_poisons():
+    well = make_world(population=4)
+    d_energy, d_hp = _feed_once(well, diet_value=1.0)
+    assert d_energy > 0.0          # a specialist gains energy
+    assert d_hp > -1e-6            # ...and takes no toxic damage
+
+    ill = make_world(population=4)
+    d_energy, d_hp = _feed_once(ill, diet_value=-1.0)
+    assert d_hp < 0.0             # eating what you can't digest hurts
+    assert d_energy <= 0.0        # ...and feeds you nothing (upkeep only)
+
+
+def test_feeding_excretes_enzyme_onto_the_tile():
+    from ai_world.world.food import ENZYME_IX
+
+    world = make_world(population=4)
+    k = _grass_food_ix()
+    tx, ty = _grass_tile(world)
+    world.food.values[ENZYME_IX, ty, tx] = 0.0
+    _feed_once(world, diet_value=1.0)
+    assert world.food.values[ENZYME_IX, ty, tx] > 0.0
 
 
 def test_determinism_same_seed_same_trajectory():

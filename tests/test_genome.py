@@ -25,10 +25,11 @@ def _assert_valid(genome: Genome) -> None:
         assert port.node_id in valid
         assert any(n.id == port.node_id and n.kind in ("in_port", "out_port")
                    for n in genome.nodes)
-    # the 14 fixed nodes are always present with stable ids
+    # the fixed nodes are always present with stable ids
     for fixed in range(N_PROPRIO + N_FIXED_OUT):
         assert fixed in valid
-    assert genome.node_count <= PARAMS.brain_max_nodes + 8
+    # no hard node cap any more; just a sanity ceiling to catch runaway growth
+    assert genome.node_count < 5000
 
 
 def test_random_blind_is_valid():

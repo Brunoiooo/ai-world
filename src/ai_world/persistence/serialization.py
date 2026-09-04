@@ -8,6 +8,7 @@ from dataclasses import asdict, fields
 
 import numpy as np
 
+from ai_world.world.food import N_FOOD_TYPES
 from ai_world.world.genome import (
     ConnGene,
     Genome,
@@ -20,7 +21,7 @@ from ai_world.world.grid import Grid
 from ai_world.world.params import EcoParams
 from ai_world.world.weather import WeatherState
 
-_GENOME_VERSION = 3
+_GENOME_VERSION = 4
 
 _GRID_MAGIC = b"AWG1"   # ai-world grid, version 1
 _ARRAY_MAGIC = b"AWA1"   # self-describing float32 array, version 1
@@ -69,6 +70,7 @@ def serialize_genome(genome: Genome) -> bytes:
         "physiology": asdict(genome.physiology),
         "body_signature": genome.body_signature.astype(float).tolist(),
         "mating_type": genome.mating_type.astype(float).tolist(),
+        "diet": genome.diet.astype(float).tolist(),
         "nodes": [[n.id, n.kind, n.activation] for n in genome.nodes],
         "conns": [[c.innov, c.src, c.dst, c.weight, c.enabled] for c in genome.conns],
         "ports": [
@@ -86,6 +88,9 @@ def deserialize_genome(blob: bytes) -> Genome:
         physiology=Physiology(**doc["physiology"]),
         body_signature=np.asarray(doc["body_signature"], dtype=np.float32),
         mating_type=np.asarray(doc["mating_type"], dtype=np.float32),
+        diet=np.asarray(
+            doc.get("diet", np.zeros(N_FOOD_TYPES)), dtype=np.float32
+        ),
         nodes=[NodeGene(i, k, a) for i, k, a in doc.get("nodes", [])],
         conns=[
             ConnGene(innov, src, dst, w, bool(en))

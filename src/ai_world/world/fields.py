@@ -2,7 +2,9 @@
 
 Three fields make up the physical substrate the ecosystem runs on:
 
-* :class:`EnzymeField`   -- the food resource; regenerates on fertile terrain.
+* :class:`FoodField`     -- multi-channel food (see :mod:`ai_world.world.food`);
+  biome-grown types spread on their own terrain, derived types are deposited by
+  the organisms themselves.
 * :class:`TemperatureField` -- per-tile temperature (terrain + latitude + altitude),
   modulated by season and weather each tick.
 * :class:`SpectrumField`  -- ``C`` decaying/diffusing channels that carry the
@@ -17,22 +19,11 @@ from __future__ import annotations
 
 import numpy as np
 
+from ai_world.world.food import FOOD_TYPES, N_FOOD_TYPES
 from ai_world.world.generator import heightmap
 from ai_world.world.grid import Grid
 from ai_world.world.params import EcoParams
 from ai_world.world.tiles import Tile
-
-# How readily each terrain type grows enzymes, relative to the regen ceiling.
-TERRAIN_FERTILITY: dict[int, float] = {
-    Tile.DEEP_WATER: 0.0,
-    Tile.WATER: 0.05,
-    Tile.SAND: 0.12,
-    Tile.GRASS: 1.0,
-    Tile.FOREST: 0.85,
-    Tile.DIRT: 0.4,
-    Tile.ROCK: 0.0,
-    Tile.SNOW: 0.03,
-}
 
 # Static temperature bias per terrain type, in normalized units (0.5 == temperate).
 TERRAIN_TEMPERATURE: dict[int, float] = {
@@ -45,13 +36,6 @@ TERRAIN_TEMPERATURE: dict[int, float] = {
     Tile.ROCK: -0.02,
     Tile.SNOW: -0.18,
 }
-
-
-def _fertility_map(grid: Grid) -> np.ndarray:
-    out = np.zeros(grid.cells.shape, dtype=np.float32)
-    for tile, value in TERRAIN_FERTILITY.items():
-        out[grid.cells == int(tile)] = value
-    return out
 
 
 def _terrain_temperature_map(grid: Grid) -> np.ndarray:
@@ -95,72 +79,109 @@ def _bilinear(a: np.ndarray, x: float, y: float) -> np.ndarray:
     return top * (1.0 - fy) + bot * fy
 
 
-class EnzymeField:
-    """The food resource. ``values[y, x]`` in ``[0, capacity]``."""
+def _grow_ceilings(grid: Grid, capacity: float) -> np.ndarray:
+    """``(K, h, w)`` per-channel carrying capacity. A grown type has capacity only
+    on its own terrain; derived types (enzyme / carrion) never grow, so 0."""
+    ceilings = np.zeros((N_FOOD_TYPES, *grid.cells.shape), dtype=np.float32)
+    for k, food in enumerate(FOOD_TYPES):
+        if food.source == "grow" and food.terrain is not None:
+            ceilings[k][grid.cells == food.terrain] = capacity
+    return ceilings
+
+
+class FoodField:
+    """Multi-channel food. ``values[k, y, x]`` in ``[0, capacity]``; one plane per
+    :data:`ai_world.world.food.FOOD_TYPES` entry.
+
+    Grown types expand logistically over their own terrain and diffuse into the
+    neighbourhood; enzyme / carrion planes only decay and diffuse from whatever
+    the organisms deposit.
+    """
 
     __slots__ = (
-        "values", "_regen_ceiling", "_regen_rate", "_decay", "_diffusion", "_capacity",
+        "values", "_ceiling", "_grow", "_seed", "_decay", "_diffusion", "_capacity",
     )
 
     def __init__(
         self,
         values: np.ndarray,
-        regen_ceiling: np.ndarray,
+        ceiling: np.ndarray,
         *,
-        regen_rate: float,
-        decay: float,
+        growth_rate: float,
+        seed_rate: float,
+        decay: np.ndarray,
         diffusion: float,
         capacity: float,
     ):
         self.values = np.ascontiguousarray(values, dtype=np.float32)
-        self._regen_ceiling = np.ascontiguousarray(regen_ceiling, dtype=np.float32)
-        self._regen_rate = regen_rate
-        self._decay = decay
+        self._ceiling = np.ascontiguousarray(ceiling, dtype=np.float32)
+        self._grow = growth_rate
+        self._seed = seed_rate
+        self._decay = np.asarray(decay, dtype=np.float32)[:, None, None]
         self._diffusion = diffusion
         self._capacity = capacity
 
     @classmethod
-    def for_grid(cls, grid: Grid, params: EcoParams, rng: np.random.Generator) -> "EnzymeField":
-        ceiling = _fertility_map(grid) * params.enzyme_capacity
-        noise = rng.random(grid.cells.shape, dtype=np.float32)
-        values = ceiling * params.enzyme_initial_fill * noise
+    def for_grid(cls, grid: Grid, params: EcoParams, rng: np.random.Generator) -> "FoodField":
+        ceiling = _grow_ceilings(grid, params.food_capacity)
+        noise = rng.random(ceiling.shape, dtype=np.float32)
+        values = ceiling * params.food_initial_fill * noise
         return cls._with_params(values, ceiling, params)
 
     @classmethod
-    def rebuild(cls, grid: Grid, params: EcoParams, values: np.ndarray) -> "EnzymeField":
+    def rebuild(cls, grid: Grid, params: EcoParams, values: np.ndarray) -> "FoodField":
         """Reconstruct from persisted ``values``; the rest is derived from the grid."""
-        ceiling = _fertility_map(grid) * params.enzyme_capacity
+        ceiling = _grow_ceilings(grid, params.food_capacity)
+        if values.shape != ceiling.shape:  # pre-release: shape changed, start fresh
+            values = ceiling * params.food_initial_fill
         return cls._with_params(values, ceiling, params)
 
     @classmethod
     def _with_params(
         cls, values: np.ndarray, ceiling: np.ndarray, params: EcoParams
-    ) -> "EnzymeField":
+    ) -> "FoodField":
+        decay = np.array(
+            [
+                params.food_derived_decay if f.source != "grow" else params.food_decay
+                for f in FOOD_TYPES
+            ],
+            dtype=np.float32,
+        )
         return cls(
             values,
             ceiling,
-            regen_rate=params.enzyme_regen_rate,
-            decay=params.enzyme_decay,
-            diffusion=params.enzyme_diffusion,
-            capacity=params.enzyme_capacity,
+            growth_rate=params.food_growth_rate,
+            seed_rate=params.food_seed_rate,
+            decay=decay,
+            diffusion=params.food_diffusion,
+            capacity=params.food_capacity,
         )
 
     def step(self, regen_multiplier: float = 1.0) -> None:
-        deficit = self._regen_ceiling - self.values
-        self.values += self._regen_rate * regen_multiplier * np.maximum(deficit, 0.0)
+        headroom = self._ceiling - self.values
+        logistic = self._grow * self.values * np.maximum(headroom, 0.0) / max(self._capacity, 1e-6)
+        seed = self._seed * (self._ceiling > 0.0)
+        self.values += regen_multiplier * (logistic + seed)
         self.values -= self._decay * self.values
-        _diffuse(self.values, self._diffusion)
+        for plane in self.values:
+            _diffuse(plane, self._diffusion)
         np.clip(self.values, 0.0, self._capacity, out=self.values)
 
-    def absorb(self, x: int, y: int, amount: float) -> float:
-        """Remove up to ``amount`` enzyme from a tile; return what was taken."""
-        available = float(self.values[y, x])
+    def total(self) -> np.ndarray:
+        """``(h, w)`` summed food density across every channel."""
+        return self.values.sum(axis=0)
+
+    def absorb(self, channel: int, x: int, y: int, amount: float) -> float:
+        """Remove up to ``amount`` of one food type from a tile; return what was taken."""
+        available = float(self.values[channel, y, x])
         taken = min(available, amount)
-        self.values[y, x] = available - taken
+        self.values[channel, y, x] = available - taken
         return taken
 
-    def deposit(self, x: int, y: int, amount: float) -> None:
-        self.values[y, x] = min(self.values[y, x] + amount, self._capacity)
+    def deposit(self, channel: int, x: int, y: int, amount: float) -> None:
+        self.values[channel, y, x] = min(
+            self.values[channel, y, x] + amount, self._capacity
+        )
 
 
 class TemperatureField:

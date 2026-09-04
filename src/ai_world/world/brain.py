@@ -1,10 +1,12 @@
 """Compiling NEAT genomes to torch and running the whole population's brains.
 
-A genome's graph becomes a dense ``G x G`` weight matrix ``W`` (``G`` =
-``brain_max_nodes``), zero-padded so every organism's matrix is the same shape
-and the population can be evaluated with a single batched ``torch.bmm``. Each
-row of the batch is still one organism's own set of weights -- inherited,
-mutated and (Phase 4) crossed over independently.
+A genome's graph becomes a dense ``G x G`` weight matrix ``W``, zero-padded so
+every organism's matrix is the same shape and the population can be evaluated
+with a single batched ``torch.bmm``. ``G`` starts at ``brain_initial_width`` and
+:class:`BrainStore` widens it on demand whenever a genome evolves more nodes than
+fit -- there is no hard cap on brain size. Each row of the batch is still one
+organism's own set of weights -- inherited, mutated and crossed over
+independently.
 
 Node layout inside a genome's matrix is fixed so slices are predictable:
 
@@ -24,8 +26,10 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from ai_world.world.food import N_FOOD_TYPES
 from ai_world.world.genome import (
     ACTIVATIONS,
+    EAT_OUTPUT_BASE,
     FIXED_OUTPUTS,
     N_FIXED_OUT,
     N_PROPRIO,
@@ -35,8 +39,12 @@ from ai_world.world.genome import (
 torch.set_num_threads(1)
 
 _ACT_ID = {name: i for i, name in enumerate(ACTIVATIONS)}
-FIXED_OUT_SLICE = slice(N_PROPRIO, N_PROPRIO + N_FIXED_OUT)  # 9..13
-TURN, THRUST, EAT, ATTACK, MATE = range(N_FIXED_OUT)
+FIXED_OUT_SLICE = slice(N_PROPRIO, N_PROPRIO + N_FIXED_OUT)
+TURN, THRUST, ATTACK, MATE = range(EAT_OUTPUT_BASE)
+# per-food-type eat gates, indexed into the fixed-output block
+EAT_SLICE = slice(EAT_OUTPUT_BASE, EAT_OUTPUT_BASE + N_FOOD_TYPES)
+# column in the proprio block where the "food here" senses begin
+FOOD_SENSE_BASE = N_PROPRIO - N_FOOD_TYPES
 
 
 def _activate(x: torch.Tensor, act_ids: torch.Tensor) -> torch.Tensor:
@@ -119,7 +127,7 @@ def compile_genome(genome: Genome, g: int) -> CompiledBrain:
     order = _node_order(genome)
     n = len(order)
     if n > g:
-        raise ValueError(f"genome has {n} nodes, brain_max_nodes is {g}")
+        raise ValueError(f"genome has {n} nodes, batch width G is {g}")
     pos = {node_id: i for i, node_id in enumerate(order)}
     act_by_id = {node.id: node.activation for node in genome.nodes}
 
@@ -179,7 +187,7 @@ class BrainStore:
     """
 
     def __init__(self, params):
-        self.g = params.brain_max_nodes
+        self.g = params.brain_initial_width
         self.channels = params.spectrum_channels
         self.samples = params.brain_sensor_samples
         self._n = 0
@@ -219,10 +227,35 @@ class BrainStore:
         self.state = grow(self.state, (cap, g), torch.float32)
         self._cap = cap
 
+    def _ensure_width(self, need: int) -> None:
+        """Widen the padded node dimension ``G`` so a genome with ``need`` nodes
+        fits. Re-pads every live row's weight / activation / mask / state tensor
+        into the wider shape. ``G`` only ever grows -- there is no brain-size cap."""
+        if need <= self.g:
+            return
+        g2 = max(need, self.g * 2)
+        old_g = self.g
+        if self._cap:
+            def widen(src: torch.Tensor, shape, dtype, square: bool):
+                dst = torch.zeros(shape, dtype=dtype)
+                if self._n:
+                    if square:
+                        dst[: self._n, :old_g, :old_g] = src[: self._n, :old_g, :old_g]
+                    else:
+                        dst[: self._n, :old_g] = src[: self._n, :old_g]
+                return dst
+
+            self.W = widen(self.W, (self._cap, g2, g2), torch.float32, True)
+            self.act = widen(self.act, (self._cap, g2), torch.int64, False)
+            self.mask = widen(self.mask, (self._cap, g2), torch.bool, False)
+            self.state = widen(self.state, (self._cap, g2), torch.float32, False)
+        self.g = g2
+
     # --- population sync ------------------------------------------
     def append(self, genomes: list[Genome]) -> None:
         if not genomes:
             return
+        self._ensure_width(max(gen.node_count for gen in genomes))
         compiled = [compile_genome(gen, self.g) for gen in genomes]
         start = self._n
         self._ensure(start + len(compiled))
@@ -286,11 +319,15 @@ class BrainStore:
         return self.ports_in.owner
 
     # --- per-tick step -------------------------------------------
-    def _proprio(self, pop, temp_here: np.ndarray, traits) -> np.ndarray:
+    def _proprio(
+        self, pop, temp_here: np.ndarray, traits, food_here: np.ndarray
+    ) -> np.ndarray:
         n = self._n
         out = np.zeros((n, N_PROPRIO), dtype=np.float32)
-        out[:, 0] = pop.energy
-        out[:, 1] = 1.0 - pop.energy
+        # energy has no ceiling any more; keep the two sensor channels bounded
+        # so a huge reserve doesn't saturate the brain's inputs.
+        out[:, 0] = np.tanh(pop.energy)                 # fullness, -> ~1 when stocked
+        out[:, 1] = np.clip(1.0 - pop.energy, 0.0, 1.0)  # hunger
         out[:, 2] = pop.hp
         out[:, 3] = np.tanh(pop.age / _AGE_SCALE)
         out[:, 4] = pop.speed / np.maximum(traits[:, 0], 1e-3)
@@ -300,6 +337,7 @@ class BrainStore:
         comfort_w = np.maximum(traits[:, 4], 1e-3)
         out[:, 7] = np.clip((temp_here - comfort_c) / comfort_w, -3.0, 3.0)
         out[:, 8] = 1.0
+        out[:, FOOD_SENSE_BASE:N_PROPRIO] = food_here  # food type k on this tile
         return out
 
     def _sample_wedge(self, ports, pop):
@@ -330,11 +368,17 @@ class BrainStore:
         return contrib
 
     @torch.inference_mode()
-    def step(self, pop, spectrum_values: np.ndarray, temp_here: np.ndarray) -> np.ndarray:
+    def step(
+        self,
+        pop,
+        spectrum_values: np.ndarray,
+        temp_here: np.ndarray,
+        food_here: np.ndarray,
+    ) -> np.ndarray:
         n = self._n
         if n == 0:
             return np.zeros((0, N_FIXED_OUT), dtype=np.float32)
-        proprio = self._proprio(pop, temp_here, pop.traits)
+        proprio = self._proprio(pop, temp_here, pop.traits, food_here)
         inputs_np = self._sense(pop, spectrum_values)
         inputs_np[:, :N_PROPRIO] = proprio
 

@@ -74,6 +74,10 @@ _MIGRATIONS: list[str] = [
         traits     BLOB    NOT NULL
     );
     """,
+    # v6 -- the single "enzyme" plane became a multi-channel food field
+    """
+    ALTER TABLE worlds RENAME COLUMN enzymes TO food;
+    """,
 ]
 
 

@@ -9,10 +9,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-# Ecosystem is only simulated for maps up to this size (field diffusion over
-# every tile every tick gets too expensive beyond it). Larger maps stay
-# terrain-only.
-ECOSYSTEM_MAX_DIM = 512
+# The ecosystem can be simulated for any map the app allows (matches
+# ``config.MAX_MAP_DIM``). Field diffusion is O(tiles) per tick, so very large
+# maps run slowly -- that is a deliberate trade-off, not a hard limit.
+ECOSYSTEM_MAX_DIM = 4096
 
 DEFAULT_ECOSYSTEM_DIM = 144
 
@@ -22,17 +22,18 @@ class EcoParams:
     # --- world spectrum -------------------------------------------------
     spectrum_channels: int = 6
     # Reserved channel indices written by the world itself (not by organisms).
-    enzyme_channel: int = 0
+    food_channel: int = 0            # spectrum mirror of the total food density
     temperature_channel: int = 1
 
-    # --- enzyme (food) field -----------------------------------------
-    enzyme_capacity: float = 1.0
-    enzyme_regen_rate: float = 0.0012  # pull toward the per-tile ceiling per tick;
-                                       # sets the world's food throughput -> carrying capacity
-    enzyme_decay: float = 0.006       # global leak toward zero per tick
-    enzyme_diffusion: float = 0.012
-    enzyme_initial_fill: float = 0.35  # a modest starting surplus cushions the first
-                                       # generations while foraging behaviour evolves
+    # --- food field (multi-channel: see ai_world.world.food.FOOD_TYPES) ----
+    food_capacity: float = 1.0
+    food_growth_rate: float = 0.02     # logistic rate: existing patches expand
+    food_seed_rate: float = 0.0006     # trickle onto barren fertile tiles so a
+                                       # grazed-out biome can be recolonised
+    food_decay: float = 0.004          # global leak toward zero per tick (grown types)
+    food_derived_decay: float = 0.02   # faster leak for enzyme / carrion
+    food_diffusion: float = 0.02       # spreads a patch into its neighbourhood
+    food_initial_fill: float = 0.30    # starting surplus while foraging evolves
 
     # --- spectrum field --------------------------------------------------
     spectrum_decay: float = 0.16
@@ -49,11 +50,16 @@ class EcoParams:
 
     # --- population ----------------------------------------------------
     initial_population: int = 500
-    population_soft_cap: int = 6000   # far-off safety net; food scarcity sets the real equilibrium
     spawn_energy: float = 0.55
+    # No population cap: the food supply + mortality set the equilibrium.
 
     # --- brain --------------------------------------------------------
-    brain_max_nodes: int = 32      # hard cap on nodes per organism (batch padding width)
+    brain_initial_width: int = 48  # starting batch-padding width G for the brain
+                                   # tensor. NOT a cap -- BrainStore widens G on
+                                   # demand as brains evolve past it. Fixed block
+                                   # is 25 nodes: 15 proprio (9 + one "food here"
+                                   # sense per food type) + 10 outputs (turn,
+                                   # thrust, attack, mate, one eat gate per type).
     brain_sensor_samples: int = 5  # ray samples per IN port per tick
 
     # --- metabolism (all drains are energy per tick) -------------------
@@ -71,23 +77,33 @@ class EcoParams:
     emit_cost: float = 0.003
 
     # --- feeding / vitals --------------------------------------------
-    eat_rate: float = 0.03               # max enzyme absorbed per tick
+    eat_rate: float = 0.03               # max food absorbed per tick, per food type
+    food_digest_cap: float = 1.25        # ceiling on how nourishing a well-adapted diet gets
+    food_toxicity: float = 0.05          # hp lost per unit of mismatched (diet < 0) intake
+    enzyme_yield: float = 0.3            # fraction of intake excreted back as the enzyme type
     sated_energy: float = 0.7            # at/above this, hp regenerates
     hp_decay_starving: float = 0.02      # hp lost per tick while energy == 0
     thermal_penalty: float = 0.020       # energy/tick per unit of temperature outside the comfort band
     drown_penalty: float = 0.030         # energy/tick in deep water
     water_slow: float = 0.5              # movement multiplier on (shallow) water
-    corpse_enzyme_fraction: float = 0.6  # of body mass returned to the tile on death
-    max_age: int = 200_000              # hard senescence cutoff (safety)
+    corpse_food_fraction: float = 0.6    # of body mass left as carrion on the tile on death
+    # No hard age cutoff: death comes only when hp hits 0 (the aging ceiling
+    # below is what eventually forces that for a well-fed body).
 
     # --- aging / senescence ---------------------------------------------
     # The max-hp ceiling falls from 1.0 as an organism ages, so even a
     # perpetually well-fed body still weakens and dies of old age -- no
     # perpetual-motion population. `aging_speed` is global and cannot be
     # evolved away; the genome's `senescence_rate` only modulates the slope.
-    aging_speed: float = 1.0            # 0 disables aging; 1 => ceiling hits the floor at aging_scale
-    aging_scale: float = 45_000.0       # nominal lifespan in ticks (at senescence_rate 0)
+    # The decline is also proportional to the organism's metabolic load --
+    # a big brain / heavy body ages faster, the same way it burns more energy.
+    aging_speed: float = 1.0            # 0 disables aging; 1 => a baseline body's
+                                        # ceiling hits the floor around aging_scale
+    aging_scale: float = 45_000.0       # reference lifespan in ticks for a minimal,
+                                        # senescence_rate-0 organism
     aging_gene_influence: float = 0.6   # how much genome senescence_rate accelerates the decline
+    aging_load_influence: float = 0.5   # how strongly metabolic load above the
+                                        # baseline steepens the decline
     aging_hp_floor: float = 0.0         # the max-hp ceiling never drops below this
 
     # --- reproduction (sexual) --------------------------------------

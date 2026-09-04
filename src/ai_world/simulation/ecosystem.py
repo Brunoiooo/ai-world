@@ -15,8 +15,9 @@ from typing import Callable
 
 import numpy as np
 
-from ai_world.world.brain import ATTACK, EAT, MATE, THRUST, TURN
+from ai_world.world.brain import ATTACK, EAT_SLICE, MATE, THRUST, TURN
 from ai_world.world.entity import Entity
+from ai_world.world.food import CARRION_IX, ENZYME_IX, N_FOOD_TYPES
 from ai_world.world.genome import Genome, crossover, mutate, physiology_vector
 from ai_world.world.params import EcoParams
 from ai_world.world.population import TRAIT_IX, Population
@@ -77,16 +78,59 @@ def thermal_penalty(temperature: float, genome: Genome, params: EcoParams) -> fl
     return float(thermal_penalty_vec(np.array([temperature]), traits, params)[0])
 
 
-def max_hp_vec(traits: np.ndarray, params: EcoParams, age: np.ndarray) -> np.ndarray:
+# Standing metabolic load (energy/tick, minus base_upkeep) of a minimal
+# blind-start organism: the level at which the aging load factor is ~1.0.
+# size .0005 + speed .00042 + regen .00012 + combat .00016 + ~25 brain nodes
+# .001 + ~11 conns .00022 ~= 0.0026.
+_AGING_LOAD_REF = 0.0026
+
+
+def senescence_load_vec(
+    traits: np.ndarray,
+    params: EcoParams,
+    n_nodes: np.ndarray,
+    n_conns: np.ndarray,
+    port_cost: np.ndarray,
+) -> np.ndarray:
+    """Aging multiplier from an organism's metabolic load. ~1.0 for a baseline
+    body; grows as brain / body / ports get more expensive, so complexity
+    shortens lifespan the same way it drains energy."""
+    load = (
+        params.size_upkeep * traits[:, _IX_SIZE]
+        + params.speed_upkeep * traits[:, _IX_SPEED]
+        + params.regen_upkeep * traits[:, _IX_REGEN]
+        + params.combat_upkeep * (traits[:, _IX_ATK] + traits[:, _IX_ARM])
+        + params.brain_node_upkeep * n_nodes
+        + params.brain_conn_upkeep * n_conns
+        + params.port_upkeep * port_cost
+    )
+    return 1.0 + params.aging_load_influence * np.maximum(0.0, load / _AGING_LOAD_REF - 1.0)
+
+
+def max_hp_vec(
+    traits: np.ndarray,
+    params: EcoParams,
+    age: np.ndarray,
+    n_nodes: np.ndarray | float = 0.0,
+    n_conns: np.ndarray | float = 0.0,
+    port_cost: np.ndarray | float = 0.0,
+) -> np.ndarray:
     """Age ceiling on hp.
 
     Falls linearly from 1.0 with age. ``aging_speed`` is a global knob that
-    evolution cannot escape; the genome's ``senescence_rate`` only steepens the
-    slope. A body that reaches the floor can no longer sustain itself, so the
+    evolution cannot escape; the genome's ``senescence_rate`` steepens the
+    slope, and so does a heavy metabolic load (see :func:`senescence_load_vec`).
+    A body that reaches the floor can no longer sustain itself, so the
     population can never be a perpetual-motion machine.
     """
     gene_accel = 1.0 + params.aging_gene_influence * traits[:, _IX_SENESCENCE]
-    ceiling = 1.0 - params.aging_speed * gene_accel * (age / params.aging_scale)
+    load_accel = senescence_load_vec(
+        traits, params,
+        np.asarray(n_nodes, dtype=np.float64),
+        np.asarray(n_conns, dtype=np.float64),
+        np.asarray(port_cost, dtype=np.float64),
+    )
+    ceiling = 1.0 - params.aging_speed * gene_accel * load_accel * (age / params.aging_scale)
     return np.clip(ceiling, params.aging_hp_floor, 1.0)
 
 
@@ -109,14 +153,14 @@ def weather_system(world: World) -> None:
 
 def fields_system(world: World) -> None:
     params = world.eco_params
-    assert params and world.enzymes and world.spectrum and world.temperature and world.weather
-    world.enzymes.step(world.weather.regen_multiplier)
+    assert params and world.food and world.spectrum and world.temperature and world.weather
+    world.food.step(world.weather.regen_multiplier)
     # Signal decay/diffusion is slow on a watchable timescale — stepping it on a
     # stride (with a matching rate bump inside the field) keeps the look while
     # halving the per-tick field cost.
     if world.tick % params.spectrum_interval == 0:
         world.spectrum.step()
-    world.spectrum.set_channel(params.enzyme_channel, world.enzymes.values)
+    world.spectrum.set_channel(params.food_channel, world.food.total())
     world.spectrum.set_channel(params.temperature_channel, world.temperature.values)
 
 
@@ -133,13 +177,14 @@ def think_system(world: World) -> None:
     tx = pop.x.astype(np.intp)
     ty = pop.y.astype(np.intp)
     temp_here = world.temperature.values[ty, tx]
-    outputs = pop.brains.step(pop, world.spectrum.values, temp_here)  # (n, 5)
+    food_here = world.food.values[:, ty, tx].T          # (n, N_FOOD_TYPES)
+    outputs = pop.brains.step(pop, world.spectrum.values, temp_here, food_here)
 
     pop.i_turn = outputs[:, TURN]                 # tanh node -> -1..1
     pop.i_thrust = outputs[:, THRUST]             # sigmoid node -> 0..1
     # every action is a brain decision -- no reflexes. An organism that never
-    # learns to fire `eat` starves; one that never fires `mate` leaves no line.
-    pop.i_eat = outputs[:, EAT] > 0.5
+    # learns to fire an `eat` gate starves; one that never fires `mate` leaves no line.
+    pop.i_eat = outputs[:, EAT_SLICE] > 0.5       # (n, N_FOOD_TYPES) per-type gate
     pop.i_attack = outputs[:, ATTACK] > 0.5
     pop.i_mate = outputs[:, MATE] > 0.5
 
@@ -149,8 +194,8 @@ def act_system(world: World) -> None:
     if pop is None or not len(pop):
         return
     params = world.eco_params
-    grid, enzymes, spectrum, temperature = (
-        world.grid, world.enzymes, world.spectrum, world.temperature
+    grid, food, spectrum, temperature = (
+        world.grid, world.food, world.spectrum, world.temperature
     )
     n = len(pop)
     traits = pop.traits
@@ -171,12 +216,25 @@ def act_system(world: World) -> None:
     tx, ty = pop.x.astype(np.intp), pop.y.astype(np.intp)
     tile = grid.cells[ty, tx]
 
-    want = params.eat_rate * size * pop.i_eat
-    available = enzymes.values[ty, tx].astype(np.float64)
+    # feeding: one gate per food type, outcome per type set by the diet gene.
+    # A well-adapted diet (>0) nourishes; a mismatched one (<0) poisons.
+    want = (params.eat_rate * size)[:, None] * pop.i_eat            # (n, K)
+    available = food.values[:, ty, tx].T.astype(np.float64)        # (n, K)
     taken = np.minimum(available, want)
-    np.add.at(enzymes.values, (ty, tx), -taken.astype(np.float32))
-    enzymes.values[ty, tx] = np.maximum(0.0, enzymes.values[ty, tx])
-    pop.energy = np.minimum(1.0, pop.energy + taken * traits[:, _IX_META])
+    for k in range(N_FOOD_TYPES):
+        np.add.at(food.values[k], (ty, tx), -taken[:, k].astype(np.float32))
+    np.clip(food.values, 0.0, None, out=food.values)
+
+    digest = np.clip(pop.diet, 0.0, params.food_digest_cap)        # (n, K)
+    toxic = np.clip(-pop.diet, 0.0, 1.0)
+    # energy has no ceiling -- a well-fed organism can bank a reserve
+    pop.energy = pop.energy + (taken * digest).sum(axis=1) * traits[:, _IX_META]
+    pop.hp = pop.hp - (taken * toxic).sum(axis=1) * params.food_toxicity
+
+    # a fraction of everything eaten is excreted back to the tile as enzyme,
+    # food for detritivores that specialise on it
+    excreted = taken.sum(axis=1) * params.enzyme_yield
+    np.add.at(food.values[ENZYME_IX], (ty, tx), excreted.astype(np.float32))
 
     passive = (pop.signature * (0.04 * size)[:, None]).astype(np.float32)  # (n, C)
     for channel in range(spectrum.channels):
@@ -211,23 +269,27 @@ def vitals_system(world: World) -> None:
         return
     params = world.eco_params
 
-    ceiling = max_hp_vec(pop.traits, params, pop.age.astype(np.float64))
+    ceiling = max_hp_vec(
+        pop.traits, params, pop.age.astype(np.float64),
+        pop.brains.n_nodes, pop.brains.n_conns, pop.brains.port_cost,
+    )
     starving = pop.energy <= 0.0
     sated = pop.energy >= params.sated_energy
     pop.hp = pop.hp - np.where(starving, params.hp_decay_starving, 0.0)
     pop.hp = pop.hp + np.where(sated, pop.traits[:, _IX_REGEN], 0.0)
-    # the aging ceiling clamps hp down even when it was already high
+    # the aging ceiling clamps hp down even when it was already high; it is the
+    # only thing that eventually kills a perpetually well-fed body (no max_age).
     pop.hp = np.minimum(pop.hp, ceiling)
 
-    dead = (pop.hp <= 0.0) | (pop.age >= params.max_age)
+    dead = pop.hp <= 0.0
     if dead.any():
         di = np.flatnonzero(dead)
         tx, ty = pop.x[di].astype(np.intp), pop.y[di].astype(np.intp)
         mass = (
-            params.corpse_enzyme_fraction * pop.traits[di, _IX_SIZE]
+            params.corpse_food_fraction * pop.traits[di, _IX_SIZE]
             + np.maximum(0.0, pop.energy[di])
         )
-        np.add.at(world.enzymes.values, (ty, tx), (mass * 0.25).astype(np.float32))
+        np.add.at(world.food.values[CARRION_IX], (ty, tx), (mass * 0.25).astype(np.float32))
         pop.keep(~dead)
 
 
@@ -244,7 +306,7 @@ def _resolve_attack(pop: Population, i: int, params: EcoParams) -> None:
     pop.hp[target] -= damage
     stolen = min(pop.energy[target], damage * 0.5)
     pop.energy[target] -= stolen
-    pop.energy[i] = min(1.0, pop.energy[i] + stolen)
+    pop.energy[i] = pop.energy[i] + stolen
 
 
 def _reproduce(world: World, pop: Population, params: EcoParams) -> None:
@@ -255,8 +317,7 @@ def _reproduce(world: World, pop: Population, params: EcoParams) -> None:
     # When to mate (within those limits) is entirely the brain's call.
     willing = pop.i_mate & (pop.energy >= params.repro_cost) & (pop.repro_cd <= 0)
     candidates = np.flatnonzero(willing)
-    room = params.population_soft_cap - len(pop)
-    if room <= 0 or candidates.size < 2:
+    if candidates.size < 2:  # no population cap -- food + mortality set the size
         return
 
     rng = world.eco_rng
@@ -268,7 +329,7 @@ def _reproduce(world: World, pop: Population, params: EcoParams) -> None:
 
     for i in candidates:
         i = int(i)
-        if i in paired or len(newborns) >= room:
+        if i in paired:
             continue
         partner = _find_partner(pop, i, willing, paired, mt, lo2, hi2, params.mating_range)
         if partner is None:

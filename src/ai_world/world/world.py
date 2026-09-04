@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import numpy as np
 
 from ai_world.world.entity import Entity
-from ai_world.world.fields import EnzymeField, SpectrumField, TemperatureField
+from ai_world.world.fields import FoodField, SpectrumField, TemperatureField
 from ai_world.world.genome import Genome, Innovations
 from ai_world.world.grid import Grid
 from ai_world.world.params import ECOSYSTEM_MAX_DIM, EcoParams
@@ -40,7 +40,7 @@ class World:
     eco_rng: np.random.Generator | None = None
     innovations: Innovations | None = None
     species: SpeciesRegistry | None = None
-    enzymes: EnzymeField | None = None
+    food: FoodField | None = None
     spectrum: SpectrumField | None = None
     temperature: TemperatureField | None = None
     weather: WeatherState | None = None
@@ -56,7 +56,7 @@ class World:
 
     @property
     def ecosystem_enabled(self) -> bool:
-        return self.enzymes is not None
+        return self.food is not None
 
     def touch(self) -> None:
         self.updated_at = _now()
@@ -86,7 +86,7 @@ def attach_ecosystem(world: World, params: EcoParams) -> None:
     world.species = SpeciesRegistry(
         threshold=params.species_threshold, target_count=params.species_target
     )
-    world.enzymes = EnzymeField.for_grid(world.grid, params, world.eco_rng)
+    world.food = FoodField.for_grid(world.grid, params, world.eco_rng)
     world.spectrum = SpectrumField.for_grid(world.grid, params)
     world.temperature = TemperatureField.for_grid(world.grid, params, world.seed)
     world.weather = WeatherState()
@@ -102,7 +102,7 @@ def rebuild_ecosystem(
     rng: np.random.Generator,
     innovations: Innovations,
     species: SpeciesRegistry,
-    enzyme_values: np.ndarray,
+    food_values: np.ndarray,
     spectrum_values: np.ndarray,
     population: Population,
 ) -> None:
@@ -112,7 +112,7 @@ def rebuild_ecosystem(
     world.innovations = innovations
     world.species = species
     world.weather = weather
-    world.enzymes = EnzymeField.rebuild(world.grid, params, enzyme_values)
+    world.food = FoodField.rebuild(world.grid, params, food_values)
     world.spectrum = SpectrumField.rebuild(params, spectrum_values)
     world.temperature = TemperatureField.for_grid(world.grid, params, world.seed)
     world.refresh_temperature()

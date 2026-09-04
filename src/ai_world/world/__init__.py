@@ -1,6 +1,7 @@
 """World model: tile grid, terrain generation, fields, organisms, (de)serialization."""
 from ai_world.world.entity import Entity
-from ai_world.world.fields import EnzymeField, SpectrumField, TemperatureField
+from ai_world.world.fields import FoodField, SpectrumField, TemperatureField
+from ai_world.world.food import FOOD_TYPES, N_FOOD_TYPES
 from ai_world.world.genome import Genome, Innovations, Physiology, mutate
 from ai_world.world.grid import Grid
 from ai_world.world.params import ECOSYSTEM_MAX_DIM, EcoParams
@@ -21,7 +22,9 @@ __all__ = [
     "TILE_COLORS",
     "TILE_NAMES",
     "World",
-    "EnzymeField",
+    "FoodField",
+    "FOOD_TYPES",
+    "N_FOOD_TYPES",
     "SpectrumField",
     "TemperatureField",
     "WeatherState",
