@@ -97,7 +97,7 @@ def test_heavy_metabolic_load_ages_faster():
         Physiology(max_speed=0.6, size=1.0, metabolic_efficiency=0.8,
                    comfort_center=0.5, comfort_width=0.25, attack_power=0.2,
                    armor=0.2, hp_regen_rate=0.01, mutation_rate=0.5,
-                   senescence_rate=0.0)
+                   senescence_rate=0.0, repro_cooldown_mult=1.0, litter_size=1.0)
     )[None, :]
     age = np.array([12_000.0])
     lean = max_hp_vec(traits, params, age, n_nodes=25, n_conns=11, port_cost=0.0)[0]
@@ -163,7 +163,11 @@ def test_sexual_reproduction_crosses_two_parents():
     pop.species_id[0] = pop.species_id[1] = 1
     pop.mating_type[0] = [0.0, 0.0, 0.0]
     pop.mating_type[1] = [1.0, 0.0, 0.0]  # distance 1.0, inside the band
-    pop.energy[:] = 1.0  # full: one tick of upkeep still leaves them above repro_cost
+    pop.energy[:] = 1.1  # comfortably above 2x repro_cost even after a tick of upkeep
+    # a high litter-size gene all but guarantees the Poisson draw clears the
+    # affordability cap below, so the realised litter is deterministic: 2.
+    pop.traits[0, TRAIT_IX["litter_size"]] = 50.0
+    pop.traits[1, TRAIT_IX["litter_size"]] = 50.0
     pop.rebuild_index()
     n = len(pop)
     pop.i_turn = np.zeros(n)
@@ -175,13 +179,14 @@ def test_sexual_reproduction_crosses_two_parents():
     before = len(pop)
     act_system(world)
 
-    assert len(pop) == before + 1
-    child = pop.snapshot(len(pop) - 1)
-    assert child.parent_a in (int(pop.id[0]), int(pop.id[1]))
-    assert child.parent_b in (int(pop.id[0]), int(pop.id[1]))
-    assert child.parent_a != child.parent_b
-    assert pop.energy[0] < 0.95 and pop.energy[1] < 0.95
-    assert child.species_id >= 1
+    assert len(pop) == before + 2  # energy affords exactly 2 at repro_cost=0.5
+    for offset in (0, 1):
+        child = pop.snapshot(before + offset)
+        assert child.parent_a in (int(pop.id[0]), int(pop.id[1]))
+        assert child.parent_b in (int(pop.id[0]), int(pop.id[1]))
+        assert child.parent_a != child.parent_b
+        assert child.species_id >= 1
+    assert pop.energy[0] < 0.2 and pop.energy[1] < 0.2  # spent 2x repro_cost
 
 
 def test_corpse_leaves_carrion_on_the_tile():

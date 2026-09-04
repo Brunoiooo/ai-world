@@ -40,6 +40,10 @@ N_FIXED_OUT = len(FIXED_OUTPUTS)         # 4 + N_FOOD_TYPES -> node ids 15..24
 FIRST_DYNAMIC_NODE = N_PROPRIO + N_FIXED_OUT  # 25
 EAT_OUTPUT_BASE = 4                      # index of eat_0 within FIXED_OUTPUTS
 
+# node ids of the per-food-type "food here" proprio senses -- used to price
+# actually *reading* that sense (see Genome.food_sense_count).
+FOOD_SENSE_NODE_IDS: tuple[int, ...] = tuple(range(N_PROPRIO - N_FOOD_TYPES, N_PROPRIO))
+
 ACTIVATIONS = ("identity", "tanh", "sigmoid", "relu", "sin", "gauss", "abs")
 _HIDDEN_ACTIVATIONS = ("tanh", "sigmoid", "relu", "sin", "gauss", "abs")
 
@@ -59,6 +63,11 @@ class Physiology:
     hp_regen_rate: float
     mutation_rate: float
     senescence_rate: float
+    # reproduction genes (Phase "food-limited population" follow-up): both cost
+    # standing energy (see ecosystem.standing_upkeep_vec) and steepen aging, the
+    # same way an expensive brain or body does -- fecundity is not free.
+    repro_cooldown_mult: float  # x EcoParams.repro_cooldown -- <1 cycles faster
+    litter_size: float          # mean offspring per successful mating (Poisson)
 
     @classmethod
     def random(cls, rng: np.random.Generator) -> "Physiology":
@@ -76,12 +85,15 @@ class Physiology:
             hp_regen_rate=jitter(0.01, 0.005, 0.0, 0.05),
             mutation_rate=jitter(0.5, 0.15, 0.05, 2.0),
             senescence_rate=jitter(0.5, 0.2, 0.0, 2.0),
+            repro_cooldown_mult=jitter(1.0, 0.3, 0.15, 6.0),
+            litter_size=jitter(1.2, 0.5, 0.0, 8.0),
         )
 
 
 PHYS_FIELDS: tuple[str, ...] = (
     "max_speed", "size", "metabolic_efficiency", "comfort_center", "comfort_width",
     "attack_power", "armor", "hp_regen_rate", "mutation_rate", "senescence_rate",
+    "repro_cooldown_mult", "litter_size",
 )
 
 # Lower bounds are real physical floors (a non-positive size / speed / width is
@@ -100,6 +112,8 @@ PHYS_BOUNDS: dict[str, tuple[float, float]] = {
     "hp_regen_rate": (0.0, 5.0),
     "mutation_rate": (0.02, 50.0),
     "senescence_rate": (0.0, 50.0),
+    "repro_cooldown_mult": (0.15, 8.0),
+    "litter_size": (0.0, 10.0),
 }
 
 # Per-trait mutation step size, so widening the bounds above does not turn every
@@ -108,7 +122,7 @@ _PHYS_STEP: dict[str, float] = {
     "max_speed": 0.18, "size": 0.22, "metabolic_efficiency": 0.11,
     "comfort_center": 0.06, "comfort_width": 0.04, "attack_power": 0.12,
     "armor": 0.06, "hp_regen_rate": 0.005, "mutation_rate": 0.18,
-    "senescence_rate": 0.18,
+    "senescence_rate": 0.18, "repro_cooldown_mult": 0.15, "litter_size": 0.15,
 }
 
 
@@ -219,6 +233,14 @@ class Genome:
 
     def port_cost(self) -> float:
         return sum(p.gain * p.reach * p.reach / max(p.arc, 0.15) for p in self.ports)
+
+    def food_sense_count(self) -> int:
+        """How many of the free per-food-type ``food_k`` proprio senses this
+        brain actually reads (has an enabled outgoing connection from). Reading
+        the sense costs upkeep (see ``EcoParams.food_sense_upkeep``) -- it is a
+        real organ to maintain, not a free download of the tile's contents."""
+        used_srcs = {c.src for c in self.conns if c.enabled}
+        return sum(1 for nid in FOOD_SENSE_NODE_IDS if nid in used_srcs)
 
     def in_port_node_ids(self) -> list[int]:
         return [p.node_id for p in self.ports if p.mode == "in"]

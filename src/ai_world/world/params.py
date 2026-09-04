@@ -72,9 +72,39 @@ class EcoParams:
     brain_node_upkeep: float = 0.000040  # x active brain nodes
     brain_conn_upkeep: float = 0.000020  # x enabled connections
     port_upkeep: float = 0.00020         # x sum(gain * reach^2 / arc)
-    move_cost: float = 0.008             # x speed^2
+    move_cost: float = 0.010             # x size x speed^2 (mass in motion -- a
+                                         # bigger body pays more to shift itself)
     attack_cost: float = 0.02
     emit_cost: float = 0.003
+    eat_attempt_cost: float = 0.0012     # x number of eat gates held open this tick.
+                                         # Firing `eat` costs whether or not the tile
+                                         # has food, so a brain that never gates it on
+                                         # the "food here" sense bleeds energy -- eating
+                                         # is a decision, not a free reflex. Raised 4x
+                                         # from the original 0.0003: at that level
+                                         # holding every gate open all the time was
+                                         # cheaper than evolving a narrower diet, so
+                                         # nothing ever specialised.
+    food_sense_upkeep: float = 0.00060   # x number of food_k proprio senses this
+                                         # brain actually reads (Genome.food_sense_count).
+                                         # The "food here" sense is hard-wired into every
+                                         # genome, but *using* it (wiring it to anything)
+                                         # is not free -- same idea as an evolved port,
+                                         # priced so ports remain competitive with it
+                                         # instead of being strictly dominated.
+    reserve_upkeep: float = 0.015        # x max(0, energy - sated_energy). Carrying a
+                                         # reserve above satiety costs a fraction of it
+                                         # per tick (fat is a load), so a well-fed
+                                         # organism's energy settles at an equilibrium
+                                         # instead of climbing without bound.
+    litter_upkeep: float = 0.00060       # x physiology.litter_size -- standing cost of
+                                         # carrying a high-fecundity body plan, paid every
+                                         # tick whether or not the organism is currently
+                                         # breeding (same pattern as size_upkeep).
+    cycling_upkeep: float = 0.00080      # x max(0, 1/repro_cooldown_mult - 1) -- a
+                                         # faster-than-baseline reproductive cycle costs
+                                         # standing upkeep; cycling slower than baseline
+                                         # is free (already priced at the point of mating).
 
     # --- feeding / vitals --------------------------------------------
     eat_rate: float = 0.03               # max food absorbed per tick, per food type
@@ -107,11 +137,21 @@ class EcoParams:
     aging_hp_floor: float = 0.0         # the max-hp ceiling never drops below this
 
     # --- reproduction (sexual) --------------------------------------
-    repro_cost: float = 0.5              # energy each parent contributes to the offspring
-                                         # (also the only gate: a parent needs at least this much,
-                                         # so mating leaves it near-empty -- a natural rate limit)
-    repro_cooldown: int = 800           # ticks before an organism can mate again (bounds
-                                         # population growth so food supply can track it)
+    repro_cost: float = 0.5              # energy each parent contributes per offspring
+                                         # (also the affordability gate, per offspring --
+                                         # see genome.litter_size / _reproduce)
+    repro_cooldown: int = 800           # baseline ticks before an organism can mate again;
+                                         # the realised cooldown is this x the pair's mean
+                                         # `physiology.repro_cooldown_mult` (evolvable --
+                                         # see litter_size below), so it is no longer one
+                                         # fixed number for the whole population -- it
+                                         # bounds population growth without forcing every
+                                         # organism's reproductive rhythm to synchronise.
+    litter_cap: int = 12                # hard ceiling on offspring from one mating event --
+                                         # not a design target (litter_size can evolve past
+                                         # what typically lands here), just a safety valve
+                                         # against a single Poisson outlier tick spawning an
+                                         # absurd number of entities at once.
     mating_range: float = 10.0           # tiles within which a partner can be found
                                          # (wide enough that a sparse population can recover)
     mating_type_lo: float = 0.15         # partners must differ by more than this

@@ -68,6 +68,7 @@ class CompiledBrain:
     n_nodes: int
     n_conns: int
     port_cost: float
+    food_sense_used: int        # count of food_k proprio senses actually wired up
     in_port_slots: np.ndarray   # (k,) int64  positions of IN-port nodes
     out_port_slots: np.ndarray  # (m,) int64  positions of OUT-port nodes
 
@@ -148,7 +149,8 @@ def compile_genome(genome: Genome, g: int) -> CompiledBrain:
     out_slots = np.array([pos[p] for p in genome.out_port_node_ids()], dtype=np.int64)
     input_mask[in_slots] = True
     return CompiledBrain(
-        weight, act_ids, input_mask, n, n_conns, genome.port_cost(), in_slots, out_slots
+        weight, act_ids, input_mask, n, n_conns, genome.port_cost(),
+        genome.food_sense_count(), in_slots, out_slots,
     )
 
 
@@ -199,6 +201,7 @@ class BrainStore:
         self.n_nodes = np.zeros(0, dtype=np.int64)
         self.n_conns = np.zeros(0, dtype=np.int64)
         self.port_cost = np.zeros(0, dtype=np.float64)
+        self.food_sense_used = np.zeros(0, dtype=np.int64)
         self._compiled: list[CompiledBrain] = []
         self._genomes: list[Genome] = []
         self._last_state: np.ndarray | None = None
@@ -300,6 +303,9 @@ class BrainStore:
         self.n_nodes = np.array([c.n_nodes for c in self._compiled], dtype=np.int64)
         self.n_conns = np.array([c.n_conns for c in self._compiled], dtype=np.int64)
         self.port_cost = np.array([c.port_cost for c in self._compiled], dtype=np.float64)
+        self.food_sense_used = np.array(
+            [c.food_sense_used for c in self._compiled], dtype=np.int64
+        )
 
     def _rebuild_ports(self) -> None:
         cols_in, cols_out = _PortColumns(self.channels), _PortColumns(self.channels)

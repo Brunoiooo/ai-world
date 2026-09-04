@@ -82,7 +82,7 @@ class SpeciesRegistry:
             if sp_id in self.species:
                 self.species[sp_id].representative = genomes[idx].copy()
 
-        self._adapt_threshold(int(species_ids.size))
+        self._adapt_threshold()
         self.census.append((tick, {k: v for k, v in counts.items() if v}))
         if len(self.census) > _HISTORY_CAP:
             self.census = self.census[-_HISTORY_CAP:]
@@ -92,11 +92,11 @@ class SpeciesRegistry:
             if len(self.trait_history) > _HISTORY_CAP:
                 self.trait_history = self.trait_history[-_HISTORY_CAP:]
 
-    def _adapt_threshold(self, population: int) -> None:
-        # only nudge when the population is large enough to actually support
-        # ``target_count`` species; otherwise a small population would shatter.
-        if population < self.target_count * 20:
-            return
+    def _adapt_threshold(self) -> None:
+        # No population gate: a struggling small population needs speciation
+        # (and the niche diversification it drives) to recover, not less of
+        # it. The threshold's own clamps (1.0 .. 20.0) keep it from ever
+        # shattering into one-member "species" or collapsing to a single blob.
         live = len(self.species)
         if live > self.target_count * 1.3:
             self.threshold = min(20.0, self.threshold * 1.04)

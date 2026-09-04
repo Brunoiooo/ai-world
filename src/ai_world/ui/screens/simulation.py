@@ -250,6 +250,7 @@ class SimulationScreen(Screen):
             f"   senescence {ph.senescence_rate:.2f}",
             f"comfort {ph.comfort_center:.2f} ± {ph.comfort_width:.2f}   mut {ph.mutation_rate:.2f}",
             f"attack {ph.attack_power:.2f}   armor {ph.armor:.2f}",
+            f"litter {ph.litter_size:.2f}   cooldown x{ph.repro_cooldown_mult:.2f}",
             "diet " + "  ".join(
                 f"{n[:4]} {v:+.1f}" for n, v in zip(FOOD_NAMES, g.diet)
             ),

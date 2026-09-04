@@ -42,11 +42,21 @@ _IX_ATK = TRAIT_IX["attack_power"]
 _IX_ARM = TRAIT_IX["armor"]
 _IX_REGEN = TRAIT_IX["hp_regen_rate"]
 _IX_SENESCENCE = TRAIT_IX["senescence_rate"]
+_IX_LITTER = TRAIT_IX["litter_size"]
+_IX_REPRO_MULT = TRAIT_IX["repro_cooldown_mult"]
 
 
 # --------------------------------------------------------------------------- #
 # metabolism maths (vectorised; scalar helpers delegate for unit tests)
 # --------------------------------------------------------------------------- #
+def _cycling_load(traits: np.ndarray) -> np.ndarray:
+    """Extra load from a faster-than-baseline reproductive cycle. A
+    ``repro_cooldown_mult`` of 1.0 is baseline (free here -- already priced at
+    the point of mating); < 1.0 (cycling faster) costs standing upkeep."""
+    mult = np.maximum(traits[:, _IX_REPRO_MULT], 0.05)
+    return np.maximum(0.0, 1.0 / mult - 1.0)
+
+
 def standing_upkeep_vec(traits: np.ndarray, params: EcoParams, age: np.ndarray) -> np.ndarray:
     comfort_w = np.maximum(traits[:, _IX_CWIDTH], 1e-3)
     base = (
@@ -56,6 +66,8 @@ def standing_upkeep_vec(traits: np.ndarray, params: EcoParams, age: np.ndarray) 
         + params.regen_upkeep * traits[:, _IX_REGEN]
         + params.tolerance_upkeep * (1.0 / comfort_w - 1.0)
         + params.combat_upkeep * (traits[:, _IX_ATK] + traits[:, _IX_ARM])
+        + params.litter_upkeep * traits[:, _IX_LITTER]
+        + params.cycling_upkeep * _cycling_load(traits)
     )
     senescence = 1.0 + traits[:, _IX_SENESCENCE] * (age / _SENESCENCE_SCALE)
     return base * senescence
@@ -91,10 +103,11 @@ def senescence_load_vec(
     n_nodes: np.ndarray,
     n_conns: np.ndarray,
     port_cost: np.ndarray,
+    food_sense_used: np.ndarray | float = 0.0,
 ) -> np.ndarray:
     """Aging multiplier from an organism's metabolic load. ~1.0 for a baseline
-    body; grows as brain / body / ports get more expensive, so complexity
-    shortens lifespan the same way it drains energy."""
+    body; grows as brain / body / ports / fecundity get more expensive, so
+    complexity shortens lifespan the same way it drains energy."""
     load = (
         params.size_upkeep * traits[:, _IX_SIZE]
         + params.speed_upkeep * traits[:, _IX_SPEED]
@@ -103,6 +116,9 @@ def senescence_load_vec(
         + params.brain_node_upkeep * n_nodes
         + params.brain_conn_upkeep * n_conns
         + params.port_upkeep * port_cost
+        + params.food_sense_upkeep * np.asarray(food_sense_used, dtype=np.float64)
+        + params.litter_upkeep * traits[:, _IX_LITTER]
+        + params.cycling_upkeep * _cycling_load(traits)
     )
     return 1.0 + params.aging_load_influence * np.maximum(0.0, load / _AGING_LOAD_REF - 1.0)
 
@@ -114,6 +130,7 @@ def max_hp_vec(
     n_nodes: np.ndarray | float = 0.0,
     n_conns: np.ndarray | float = 0.0,
     port_cost: np.ndarray | float = 0.0,
+    food_sense_used: np.ndarray | float = 0.0,
 ) -> np.ndarray:
     """Age ceiling on hp.
 
@@ -129,6 +146,7 @@ def max_hp_vec(
         np.asarray(n_nodes, dtype=np.float64),
         np.asarray(n_conns, dtype=np.float64),
         np.asarray(port_cost, dtype=np.float64),
+        np.asarray(food_sense_used, dtype=np.float64),
     )
     ceiling = 1.0 - params.aging_speed * gene_accel * load_accel * (age / params.aging_scale)
     return np.clip(ceiling, params.aging_hp_floor, 1.0)
@@ -227,7 +245,9 @@ def act_system(world: World) -> None:
 
     digest = np.clip(pop.diet, 0.0, params.food_digest_cap)        # (n, K)
     toxic = np.clip(-pop.diet, 0.0, 1.0)
-    # energy has no ceiling -- a well-fed organism can bank a reserve
+    # no hard ceiling on the reserve, but carrying one above satiety costs
+    # `reserve_upkeep` per tick (see the drain below), so it settles at an
+    # equilibrium rather than climbing forever.
     pop.energy = pop.energy + (taken * digest).sum(axis=1) * traits[:, _IX_META]
     pop.hp = pop.hp - (taken * toxic).sum(axis=1) * params.food_toxicity
 
@@ -244,13 +264,16 @@ def act_system(world: World) -> None:
     temp_here = temperature.values[ty, tx]
     drain = (
         standing_upkeep_vec(traits, params, pop.age.astype(np.float64))
-        + params.move_cost * speed ** 2
+        + params.move_cost * size * speed ** 2
         + thermal_penalty_vec(temp_here, traits, params)
         + np.where(tile == _DEEP_WATER, params.drown_penalty, 0.0)
         + params.port_upkeep * pop.brains.port_cost
         + params.brain_node_upkeep * pop.brains.n_nodes
         + params.brain_conn_upkeep * pop.brains.n_conns
+        + params.food_sense_upkeep * pop.brains.food_sense_used
         + params.emit_cost * emit_cost
+        + params.eat_attempt_cost * pop.i_eat.sum(axis=1)
+        + params.reserve_upkeep * np.maximum(0.0, pop.energy - params.sated_energy)
     )
     pop.energy = np.maximum(0.0, pop.energy - drain)
     pop.age += 1
@@ -272,6 +295,7 @@ def vitals_system(world: World) -> None:
     ceiling = max_hp_vec(
         pop.traits, params, pop.age.astype(np.float64),
         pop.brains.n_nodes, pop.brains.n_conns, pop.brains.port_cost,
+        pop.brains.food_sense_used,
     )
     starving = pop.energy <= 0.0
     sated = pop.energy >= params.sated_energy
@@ -311,9 +335,10 @@ def _resolve_attack(pop: Population, i: int, params: EcoParams) -> None:
 
 def _reproduce(world: World, pop: Population, params: EcoParams) -> None:
     """Sexual reproduction: pair up willing, species-compatible neighbours of a
-    compatible mating type; the child is a NEAT crossover of both, then mutated."""
+    compatible mating type; the litter is however many NEAT crossovers (each
+    mutated independently) the pair's fecundity genes and energy afford."""
     # the gates are physical, not decisions: a parent must hold at least the
-    # energy it hands to the child, and must be off its post-mating cooldown.
+    # energy for one offspring, and must be off its post-mating cooldown.
     # When to mate (within those limits) is entirely the brain's call.
     willing = pop.i_mate & (pop.energy >= params.repro_cost) & (pop.repro_cd <= 0)
     candidates = np.flatnonzero(willing)
@@ -337,42 +362,68 @@ def _reproduce(world: World, pop: Population, params: EcoParams) -> None:
         paired.add(i)
         paired.add(partner)
 
-        pop.energy[i] -= params.repro_cost
-        pop.energy[partner] -= params.repro_cost
-        pop.repro_cd[i] = pop.repro_cd[partner] = params.repro_cooldown
+        # litter size is genetically encoded (mean of both parents' evolvable
+        # `litter_size`), realised as a Poisson draw so a high-fecundity
+        # genotype usually raises more young but still risks a dud (0) cycle;
+        # affordability caps it so a pair can never spend energy it doesn't
+        # have. The cooldown is likewise the pair's own evolvable
+        # `repro_cooldown_mult` x the baseline -- fecundity is a body plan,
+        # not one fixed number for the whole population.
+        mean_litter = 0.5 * (pop.traits[i, _IX_LITTER] + pop.traits[partner, _IX_LITTER])
+        affordable = int(min(pop.energy[i], pop.energy[partner]) // params.repro_cost)
+        n_offspring = min(int(rng.poisson(max(mean_litter, 0.0))), affordable, params.litter_cap)
+
+        # cooldown always applies -- the reproductive cycle takes the same
+        # recovery time whether or not it produces young -- but the energy
+        # charge is per offspring, so a dud (n=0) cycle costs a shot at the
+        # next window, not scarce energy on top of it.
+        cost = params.repro_cost * n_offspring
+        pop.energy[i] -= cost
+        pop.energy[partner] -= cost
+        cooldown_mult = 0.5 * (pop.traits[i, _IX_REPRO_MULT] + pop.traits[partner, _IX_REPRO_MULT])
+        pop.repro_cd[i] = pop.repro_cd[partner] = max(1, int(round(params.repro_cooldown * cooldown_mult)))
+        if n_offspring <= 0:
+            continue
+
         a_fitter = pop.energy[i] >= pop.energy[partner]
-        child_genome = mutate(
-            crossover(pop.genomes[i], pop.genomes[partner], rng, a_is_fitter=a_fitter),
-            rng, world.innovations, params,
-        )
         parent_species = int(pop.species_id[i])
-        cx = 0.5 * (pop.x[i] + pop.x[partner]) + rng.normal(0.0, 1.0)
-        cy = 0.5 * (pop.y[i] + pop.y[partner]) + rng.normal(0.0, 1.0)
-        newborns.append(
-            Entity(
-                id=pop.new_id(),
-                x=min(max(cx, 0.0), world.width - 1e-3),
-                y=min(max(cy, 0.0), world.height - 1e-3),
-                heading=float(rng.random() * _TWO_PI),
-                energy=1.5 * params.repro_cost,  # < 2x: reproduction is slightly lossy
-                hp=1.0,
-                genome=child_genome,
-                birth_tick=world.tick,
-                generation=max(int(pop.generation[i]), int(pop.generation[partner])) + 1,
-                species_id=registry.assign(child_genome, world.tick, parent_species),
-                parent_a=int(pop.id[i]),
-                parent_b=int(pop.id[partner]),
+        for _ in range(n_offspring):
+            child_genome = mutate(
+                crossover(pop.genomes[i], pop.genomes[partner], rng, a_is_fitter=a_fitter),
+                rng, world.innovations, params,
             )
-        )
+            cx = 0.5 * (pop.x[i] + pop.x[partner]) + rng.normal(0.0, 1.0)
+            cy = 0.5 * (pop.y[i] + pop.y[partner]) + rng.normal(0.0, 1.0)
+            newborns.append(
+                Entity(
+                    id=pop.new_id(),
+                    x=min(max(cx, 0.0), world.width - 1e-3),
+                    y=min(max(cy, 0.0), world.height - 1e-3),
+                    heading=float(rng.random() * _TWO_PI),
+                    energy=1.5 * params.repro_cost,  # < 2x: reproduction is slightly lossy
+                    hp=1.0,
+                    genome=child_genome,
+                    birth_tick=world.tick,
+                    generation=max(int(pop.generation[i]), int(pop.generation[partner])) + 1,
+                    species_id=registry.assign(child_genome, world.tick, parent_species),
+                    parent_a=int(pop.id[i]),
+                    parent_b=int(pop.id[partner]),
+                )
+            )
     pop.add_many(newborns)
     pop.births += len(newborns)
 
 
 def _find_partner(pop, i, willing, paired, mt, lo2, hi2, reach) -> int | None:
+    # Reproductive compatibility is judged by the evolvable `mating_type` band
+    # alone, not by `species_id` -- species is a compat_distance classification
+    # for stats/diversity (SpeciesRegistry), not a reproductive-isolation gate.
+    # Requiring an exact species match here can deadlock a small population:
+    # the moment it (harmlessly) splits into two species, same-species pairs
+    # may no longer exist locally and nobody could ever mate again.
     best, best_d2 = None, reach * reach
-    my_species = pop.species_id[i]
     for j in pop.neighbours(pop.x[i], pop.y[i], reach):
-        if j == i or j in paired or not willing[j] or pop.species_id[j] != my_species:
+        if j == i or j in paired or not willing[j]:
             continue
         type_d2 = float(np.sum((mt[i] - mt[j]) ** 2))
         if not (lo2 < type_d2 < hi2):

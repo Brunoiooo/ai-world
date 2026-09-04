@@ -21,7 +21,12 @@ from ai_world.world.grid import Grid
 from ai_world.world.params import EcoParams
 from ai_world.world.weather import WeatherState
 
-_GENOME_VERSION = 4
+_GENOME_VERSION = 5
+
+# Physiology fields added after a genome version bump: fill these in for saves
+# from before they existed rather than failing to load. Values reproduce the
+# old fixed behaviour (one offspring, the unscaled `EcoParams.repro_cooldown`).
+_PHYSIOLOGY_DEFAULTS: dict = {"repro_cooldown_mult": 1.0, "litter_size": 1.0}
 
 _GRID_MAGIC = b"AWG1"   # ai-world grid, version 1
 _ARRAY_MAGIC = b"AWA1"   # self-describing float32 array, version 1
@@ -84,8 +89,9 @@ def serialize_genome(genome: Genome) -> bytes:
 
 def deserialize_genome(blob: bytes) -> Genome:
     doc = json.loads(blob.decode("utf-8"))
+    physiology = {**_PHYSIOLOGY_DEFAULTS, **doc["physiology"]}
     return Genome(
-        physiology=Physiology(**doc["physiology"]),
+        physiology=Physiology(**physiology),
         body_signature=np.asarray(doc["body_signature"], dtype=np.float32),
         mating_type=np.asarray(doc["mating_type"], dtype=np.float32),
         diet=np.asarray(
