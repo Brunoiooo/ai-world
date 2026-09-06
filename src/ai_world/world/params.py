@@ -37,7 +37,14 @@ class EcoParams:
     food_decay: float = 0.004          # global leak toward zero per tick (grown types)
     food_derived_decay: float = 0.02   # faster leak for enzyme / carrion
     food_diffusion: float = 0.02       # spreads a patch into its neighbourhood
-    food_initial_fill: float = 0.30    # starting surplus while foraging evolves
+    food_initial_fill: float = 0.55    # starting surplus while foraging evolves (raised
+                                       # from 0.30 -- a food-rich early world keeps more
+                                       # founder lineages alive through the learning phase)
+    blind_diet_mean: float = 0.32      # mean of a blind organism's per-food digestion
+                                       # weights (was a hard-coded 0.15). At 0.15 early-life
+                                       # feeding yielded intake x ~0.15 x metabolic_eff --
+                                       # nearly nothing -- so juveniles couldn't break even
+                                       # before a real specialisation evolved.
 
     # --- spectrum field --------------------------------------------------
     spectrum_decay: float = 0.16
@@ -54,11 +61,45 @@ class EcoParams:
 
     # --- population ----------------------------------------------------
     initial_population: int = 500
-    spawn_energy: float = 0.8          # was 0.55 -- barely above repro_cost (0.5), so a
-                                        # blind organism's first mating attempt (fired by
-                                        # the seed bias below) left it with ~0 energy and
-                                        # no buffer to survive until it learned to forage.
+    spawn_energy: float = 1.6          # was 0.8, 0.55 before that. The founder die-off
+                                        # (~600 -> single digits in 500 ticks) is a ~99%
+                                        # cull that leaves ~1 species and almost no genetic
+                                        # raw material, which is why post-crash recovery
+                                        # was a coin-flip (3/9 seeds). A bigger starting
+                                        # buffer carries more of the founders -- and their
+                                        # variance -- through the learning phase.
     # No population cap: the food supply + mortality set the equilibrium.
+
+    # --- juveniles: a grace period against the starvation gap -----------
+    # ~91% of all deaths are organisms younger than 200 ticks, median age 84,
+    # every one at energy ~0 (starvation). Newborns *do* feed (98% draw food
+    # before dying) but stay net-negative until their recurrent brain learns
+    # to hold station on a patch; the 1.5x-repro_cost starting buffer only
+    # covers ~84 ticks of that. These widen the runway: for the first
+    # `juvenile_ticks` of life, standing upkeep is scaled by
+    # `juvenile_upkeep_mult` and the per-gate `eat_attempt_cost` is waived.
+    newborn_energy_mult: float = 2.2    # newborn starting energy = this x repro_cost
+                                        # (was a hard-coded 1.5)
+    juvenile_ticks: int = 220
+    juvenile_upkeep_mult: float = 0.55
+
+    # --- reproduction: density-adaptive cooldown ------------------------
+    # Mirror of the mating-range widening below. At low headcount the realised
+    # `repro_cooldown` is scaled down toward `repro_cooldown_min_mult` (linearly
+    # in n / mating_range_ref_pop), so the survivors that *do* break even get
+    # more reproductive attempts per unit time -- and the cooldown gene can't
+    # keep the lineage in the low-N trap while density is depressed.
+    repro_cooldown_min_mult: float = 0.4
+
+    # --- low-population rescue: fresh genes + forced exploration --------
+    immigration_below: int = 16        # while the population is under this, drop in one
+    immigration_interval: int = 1800   # fresh random_blind organism every N ticks -- cheap
+                                        # insurance against a monoculture of marginal
+                                        # generalists (0 interval disables).
+    low_pop_mutation_mult: float = 2.5  # x mutation_rate for offspring produced while the
+                                        # population is at/below critical_population, so the
+                                        # last-resort breeding path explores instead of
+                                        # copying a genome that already wasn't good enough.
 
     # The initial cohort is dropped in a handful of clusters rather than spread
     # uniformly across the whole map. A uniform spawn scatters survivors of the

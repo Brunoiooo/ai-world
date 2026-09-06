@@ -266,8 +266,15 @@ def act_system(world: World) -> None:
     emit_cost = pop.brains.emit(pop, spectrum.values)
 
     temp_here = temperature.values[ty, tx]
+    # juveniles get a grace period against the starvation gap: reduced standing
+    # upkeep and no per-gate eat-attempt cost for the first `juvenile_ticks` of
+    # life, so a slow learner has runway to become a competent forager instead
+    # of starving mid-lesson (see EcoParams.juvenile_ticks).
+    juvenile = pop.age < params.juvenile_ticks
+    upkeep_mult = np.where(juvenile, params.juvenile_upkeep_mult, 1.0)
+    eat_attempt_cost = np.where(juvenile, 0.0, params.eat_attempt_cost)
     drain = (
-        standing_upkeep_vec(traits, params, pop.age.astype(np.float64))
+        standing_upkeep_vec(traits, params, pop.age.astype(np.float64)) * upkeep_mult
         + params.move_cost * size * speed ** 2
         + thermal_penalty_vec(temp_here, traits, params)
         + np.where(tile == _DEEP_WATER, params.drown_penalty, 0.0)
@@ -276,7 +283,7 @@ def act_system(world: World) -> None:
         + params.brain_conn_upkeep * pop.brains.n_conns
         + params.food_sense_upkeep * pop.brains.food_sense_used
         + params.emit_cost * emit_cost
-        + params.eat_attempt_cost * pop.i_eat.sum(axis=1)
+        + eat_attempt_cost * pop.i_eat.sum(axis=1)
         + params.reserve_upkeep * np.maximum(0.0, pop.energy - params.sated_energy)
     )
     pop.energy = np.maximum(0.0, pop.energy - drain)
@@ -357,6 +364,16 @@ def _resolve_attack(pop: Population, i: int, params: EcoParams) -> None:
     pop.energy[i] = pop.energy[i] + stolen
 
 
+def _cooldown_scale(n: int, params: EcoParams) -> float:
+    """Realised reproductive cooldown shrinks toward ``repro_cooldown_min_mult``
+    as the population thins below ``mating_range_ref_pop`` -- the same density
+    taper the mating range uses. Recovering survivors then breed on a shorter
+    cycle, and the heritable cooldown gene can't keep a lineage pinned in the
+    low-N trap while density is depressed."""
+    ref = max(params.mating_range_ref_pop, 1.0)
+    return float(np.clip(n / ref, params.repro_cooldown_min_mult, 1.0))
+
+
 def _last_rites(world: World, pop: Population, params: EcoParams) -> None:
     """The true end of the line: exactly one organism is left alive. Sexual
     reproduction needs two, so no amount of range-widening or gate-bypassing
@@ -373,7 +390,7 @@ def _last_rites(world: World, pop: Population, params: EcoParams) -> None:
         return
     rng = world.eco_rng
     n_offspring = min(1, int(pop.energy[i] // params.repro_cost))
-    cooldown_mult = pop.traits[i, _IX_REPRO_MULT]
+    cooldown_mult = pop.traits[i, _IX_REPRO_MULT] * _cooldown_scale(len(pop), params)
     pop.repro_cd[i] = max(1, int(round(params.repro_cooldown * cooldown_mult)))
     if n_offspring <= 0:
         return
@@ -382,7 +399,7 @@ def _last_rites(world: World, pop: Population, params: EcoParams) -> None:
     parent_species = int(pop.species_id[i])
     child_genome = mutate(
         crossover(pop.genomes[i], pop.genomes[i], rng, a_is_fitter=True),
-        rng, world.innovations, params,
+        rng, world.innovations, params, rate_mult=params.low_pop_mutation_mult,
     )
     cx = pop.x[i] + rng.normal(0.0, 1.0)
     cy = pop.y[i] + rng.normal(0.0, 1.0)
@@ -391,7 +408,7 @@ def _last_rites(world: World, pop: Population, params: EcoParams) -> None:
         x=min(max(cx, 0.0), world.width - 1e-3),
         y=min(max(cy, 0.0), world.height - 1e-3),
         heading=float(rng.random() * _TWO_PI),
-        energy=1.5 * params.repro_cost,
+        energy=params.newborn_energy_mult * params.repro_cost,
         hp=1.0,
         genome=child_genome,
         birth_tick=world.tick,
@@ -489,7 +506,10 @@ def _reproduce(world: World, pop: Population, params: EcoParams) -> None:
         cost = params.repro_cost * n_offspring
         pop.energy[i] -= cost
         pop.energy[partner] -= cost
-        cooldown_mult = 0.5 * (pop.traits[i, _IX_REPRO_MULT] + pop.traits[partner, _IX_REPRO_MULT])
+        cooldown_mult = (
+            0.5 * (pop.traits[i, _IX_REPRO_MULT] + pop.traits[partner, _IX_REPRO_MULT])
+            * _cooldown_scale(n, params)
+        )
         pop.repro_cd[i] = pop.repro_cd[partner] = max(1, int(round(params.repro_cooldown * cooldown_mult)))
         if n_offspring <= 0:
             continue
@@ -507,10 +527,11 @@ def _reproduce(world: World, pop: Population, params: EcoParams) -> None:
         if critical:
             anchor_x = pop.x[i] if a_fitter else pop.x[partner]
             anchor_y = pop.y[i] if a_fitter else pop.y[partner]
+        rate_mult = params.low_pop_mutation_mult if critical else 1.0
         for _ in range(n_offspring):
             child_genome = mutate(
                 crossover(pop.genomes[i], pop.genomes[partner], rng, a_is_fitter=a_fitter),
-                rng, world.innovations, params,
+                rng, world.innovations, params, rate_mult=rate_mult,
             )
             if critical:
                 cx = anchor_x + rng.normal(0.0, 1.0)
@@ -524,7 +545,7 @@ def _reproduce(world: World, pop: Population, params: EcoParams) -> None:
                     x=min(max(cx, 0.0), world.width - 1e-3),
                     y=min(max(cy, 0.0), world.height - 1e-3),
                     heading=float(rng.random() * _TWO_PI),
-                    energy=1.5 * params.repro_cost,  # < 2x: reproduction is slightly lossy
+                    energy=params.newborn_energy_mult * params.repro_cost,
                     hp=1.0,
                     genome=child_genome,
                     birth_tick=world.tick,
@@ -568,6 +589,61 @@ def speciation_system(world: World) -> None:
     world.species.recount(pop.species_id, pop.genomes, world.tick, pop.traits)
 
 
+_IMMIGRATION_TILES = (
+    int(Tile.SAND), int(Tile.GRASS), int(Tile.FOREST), int(Tile.DIRT),
+)
+
+
+def immigration_system(world: World) -> None:
+    """While the population is critically small, trickle in one fresh
+    ``random_blind`` organism every ``immigration_interval`` ticks. After a
+    bottleneck the residents are a monoculture of mediocre foragers with no
+    genetic raw material left for selection to work with; a slow drip of fresh
+    genes is cheap insurance that *some* lineage carries what recovery needs.
+    An immigrant lands next to a resident (so it can still find a mate) or, if
+    the world has gone empty, on a spawn tile."""
+    params = world.eco_params
+    pop = world.population
+    assert params is not None
+    if (
+        pop is None
+        or params.immigration_interval <= 0
+        or world.tick == 0
+        or world.tick % params.immigration_interval != 0
+        or len(pop) >= params.immigration_below
+    ):
+        return
+    rng = world.eco_rng
+    assert rng is not None and world.innovations is not None
+    genome = Genome.random_blind(rng, params, world.innovations)
+    if len(pop):
+        anchor = int(rng.integers(len(pop)))
+        x = float(np.clip(pop.x[anchor] + rng.normal(0.0, 3.0), 0.0, world.width - 1e-3))
+        y = float(np.clip(pop.y[anchor] + rng.normal(0.0, 3.0), 0.0, world.height - 1e-3))
+    else:
+        land = np.argwhere(np.isin(world.grid.cells, _IMMIGRATION_TILES))
+        if not len(land):
+            return
+        row = land[int(rng.integers(len(land)))]
+        x, y = float(row[1]) + 0.5, float(row[0]) + 0.5
+    newborn = Entity(
+        id=pop.new_id(),
+        x=x,
+        y=y,
+        heading=float(rng.random() * _TWO_PI),
+        energy=params.spawn_energy,
+        hp=1.0,
+        genome=genome,
+        birth_tick=world.tick,
+        species_id=world.species.assign(genome, world.tick),
+    )
+    pop.add_many([newborn])
+    pop.births += 1
+    # keep the per-tick decision / outcome arrays indexable by row until
+    # think_system refreshes them next tick (the UI reads them in between).
+    _pad_transients(pop)
+
+
 def default_systems() -> list[System]:
     return [
         weather_system,
@@ -577,4 +653,5 @@ def default_systems() -> list[System]:
         act_system,
         vitals_system,
         speciation_system,
+        immigration_system,
     ]

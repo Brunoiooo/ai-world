@@ -283,7 +283,7 @@ class Genome:
             physiology=Physiology.random(rng),
             body_signature=(rng.random(c) * 0.6).astype(np.float32),
             mating_type=rng.normal(0.0, 1.0, MATING_TYPE_DIM).astype(np.float32),
-            diet=rng.normal(0.15, 0.35, N_FOOD_TYPES).astype(np.float32),
+            diet=rng.normal(params.blind_diet_mean, 0.35, N_FOOD_TYPES).astype(np.float32),
             nodes=nodes,
             conns=[],
             ports=ports,
@@ -310,6 +310,18 @@ class Genome:
             # burst than "give evolution something to select on" needs.
             _connect(genome, bias, N_PROPRIO + FIXED_OUTPUTS.index(name),
                      float(rng.normal(0.2, 1.0)), innov)
+
+        # a sensory-gated feeding bias: wire each "food here" sense to its own
+        # eat gate, so a blind organism tends to eat *when there is food on the
+        # tile* rather than constantly (the bias->eat_k seeds above) or never.
+        # Still not a reflex -- feeding fires only from the brain, and mutation
+        # can invert, rewire or bury this like any other connection -- it just
+        # means competent foraging is not rediscovered from scratch by every
+        # lineage, which is what made post-bottleneck recovery a coin-flip.
+        for k in range(N_FOOD_TYPES):
+            _connect(genome, FOOD_SENSE_NODE_IDS[k],
+                     N_PROPRIO + EAT_OUTPUT_BASE + k,
+                     float(rng.normal(0.9, 0.4)), innov)
         return genome
 
 
@@ -372,9 +384,13 @@ def mutate(
     rng: np.random.Generator,
     innov: Innovations,
     params: EcoParams,
+    rate_mult: float = 1.0,
 ) -> Genome:
     child = genome.copy()
-    scale = genome.physiology.mutation_rate
+    # `rate_mult` lets the caller dial the whole mutation intensity up for one
+    # birth without touching the heritable `mutation_rate` gene -- used to force
+    # exploration when the population is at its last few individuals.
+    scale = genome.physiology.mutation_rate * rate_mult
 
     _mutate_physiology(child, rng, scale)
     _mutate_signatures(child, rng, scale)

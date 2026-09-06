@@ -12,7 +12,7 @@ from ai_world.simulation.ecosystem import (
 from ai_world.world.food import CARRION_IX, N_FOOD_TYPES
 from ai_world.world.generator import generate_grid
 from ai_world.world.genome import Genome, Physiology, physiology_vector
-from ai_world.world.params import EcoParams
+from ai_world.world.params import DEFAULT_ECOSYSTEM_DIM, EcoParams
 from ai_world.world.population import TRAIT_IX
 from ai_world.world.world import World, attach_ecosystem
 
@@ -20,6 +20,17 @@ from ai_world.world.world import World, attach_ecosystem
 def make_world(*, population=90, seed=3, dim=80) -> World:
     params = EcoParams(initial_population=population)
     world = World(name="eco", grid=generate_grid(dim, dim, seed), seed=seed)
+    attach_ecosystem(world, params)
+    return world
+
+
+def make_default_world(*, seed=0) -> World:
+    """A world at the shipped defaults (map size + initial cohort). The small
+    `make_world` map cannot sustain a population; extinction there is expected,
+    so long-run survival is only meaningful at the real scale."""
+    params = EcoParams()
+    grid = generate_grid(DEFAULT_ECOSYSTEM_DIM, DEFAULT_ECOSYSTEM_DIM, seed)
+    world = World(name="eco", grid=grid, seed=seed)
     attach_ecosystem(world, params)
     return world
 
@@ -44,6 +55,32 @@ def test_run_stays_within_invariants():
         assert pop.y.min() >= 0.0 and pop.y.max() < world.height
     assert pop.births > 0
     assert pop.deaths > 0
+
+
+@pytest.mark.parametrize("seed", [0, 4])
+def test_population_recovers_after_the_founder_die_off(seed):
+    """The founder crash used to leave a lineage stuck at 2-5 individuals for the
+    rest of the run (only ~1 seed in 3 ever climbed back). With the juvenile
+    grace period, density-adaptive cooldown, low-N immigration and the seeded
+    sensory-gated feeding bias, the settled population holds in double digits
+    and grows well past the crash trough."""
+    world = make_default_world(seed=seed)
+    systems = default_systems()
+    trough = len(world.population)
+    settled_min = 10 ** 9
+    for tick in range(2200):
+        for system in systems:
+            system(world)
+        world.tick += 1
+        n = len(world.population)
+        trough = min(trough, n)
+        if tick > 600:
+            settled_min = min(settled_min, n)
+
+    pop = world.population
+    assert settled_min >= 8, f"fell back into the low-N trap (min after settle {settled_min})"
+    assert len(pop) > trough, "population never grew past the founder-crash trough"
+    assert pop.births > 0 and pop.deaths > 0  # a living, turning-over population
 
 
 def test_speed_never_exceeds_max_speed():
