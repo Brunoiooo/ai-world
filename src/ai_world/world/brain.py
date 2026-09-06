@@ -324,6 +324,28 @@ class BrainStore:
     def p_owner(self) -> np.ndarray:
         return self.ports_in.owner
 
+    def port_readout(self, row: int) -> tuple[list[float], list[float]]:
+        """Live activation of organism ``row``'s ports: ``(in_values,
+        out_values)``, each in genome port order. IN values are the sensed
+        intensity clamped into the brain this tick; OUT values are the node's
+        emitted output from the last step."""
+        if row < 0 or row >= self._n:
+            return [], []
+        state = self.state[row].numpy()
+        pin, pout = self.ports_in, self.ports_out
+        in_vals = (
+            state[pin.slot[pin.owner == row]].tolist() if pin.owner.size else []
+        )
+        out_state = (
+            self._last_state[row]
+            if self._last_state is not None and self._last_state.shape[0] > row
+            else state
+        )
+        out_vals = (
+            out_state[pout.slot[pout.owner == row]].tolist() if pout.owner.size else []
+        )
+        return in_vals, out_vals
+
     # --- per-tick step -------------------------------------------
     def _proprio(
         self, pop, temp_here: np.ndarray, traits, food_here: np.ndarray

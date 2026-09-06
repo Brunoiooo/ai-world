@@ -56,6 +56,12 @@ class Population:
         self.i_eat = np.zeros((0, N_FOOD_TYPES), dtype=bool)  # one feeding gate per food type
         self.i_attack = np.zeros(0, dtype=bool)
         self.i_mate = np.zeros(0, dtype=bool)
+        # transient per-tick *outcomes*, written by act_system after the fact and
+        # kept in step with row order by keep() -- consumed by the UI so the
+        # viewer can see who actually fed / landed a hit / bred this tick.
+        self.acted_attack = np.zeros(0, dtype=bool)
+        self.acted_eat = np.zeros(0, dtype=bool)
+        self.acted_mate = np.zeros(0, dtype=bool)
 
         if entities:
             self.add_many(entities)
@@ -127,6 +133,16 @@ class Population:
         self.last_turn = self.last_turn[:n_new]
         self.repro_cd[fill] = self.repro_cd[src]
         self.repro_cd = self.repro_cd[:n_new]
+        # keep the transient decision / outcome arrays row-aligned too, so a
+        # death mid-tick doesn't scramble what the UI draws over each organism.
+        for name in ("i_attack", "i_mate", "acted_attack", "acted_eat", "acted_mate"):
+            arr = getattr(self, name)
+            if arr.shape[0] == n:
+                arr[fill] = arr[src]
+                setattr(self, name, arr[:n_new])
+        if self.i_eat.shape[0] == n:
+            self.i_eat[fill] = self.i_eat[src]
+            self.i_eat = self.i_eat[:n_new]
         for dst, source in zip(fill, src):
             self.genomes[dst] = self.genomes[source]
         del self.genomes[n_new:]

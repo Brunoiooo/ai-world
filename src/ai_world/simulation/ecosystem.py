@@ -244,6 +244,9 @@ def act_system(world: World) -> None:
         np.add.at(food.values[k], (ty, tx), -taken[:, k].astype(np.float32))
     np.clip(food.values, 0.0, None, out=food.values)
 
+    # outcome flags for the UI: who actually drew food off a tile this tick
+    pop.acted_eat = taken.sum(axis=1) > 1e-9
+
     digest = np.clip(pop.diet, 0.0, params.food_digest_cap)        # (n, K)
     toxic = np.clip(-pop.diet, 0.0, 1.0)
     # no hard ceiling on the reserve, but carrying one above satiety costs
@@ -281,10 +284,12 @@ def act_system(world: World) -> None:
     pop.last_turn = pop.i_turn.copy()
     np.subtract(pop.repro_cd, 1, out=pop.repro_cd, where=pop.repro_cd > 0)
 
+    pop.acted_attack = np.zeros(n, dtype=bool)
     for i in np.flatnonzero(pop.i_attack):
         _resolve_attack(pop, int(i), params)
 
     _reproduce(world, pop, params)
+    _pad_transients(pop)
 
 
 def vitals_system(world: World) -> None:
@@ -321,10 +326,25 @@ def vitals_system(world: World) -> None:
 # --------------------------------------------------------------------------- #
 # helpers for the still-scalar corners
 # --------------------------------------------------------------------------- #
+def _pad_transients(pop: Population) -> None:
+    """After a birth wave the per-tick decision / outcome arrays are shorter
+    than the population; pad the tail with False (newborns did nothing this
+    tick) so every consumer can index them by row without a bounds check."""
+    n = len(pop)
+    for name in ("i_attack", "i_mate", "acted_attack", "acted_eat", "acted_mate"):
+        arr = getattr(pop, name)
+        if arr.shape[0] < n:
+            setattr(pop, name, np.append(arr, np.zeros(n - arr.shape[0], dtype=bool)))
+    if pop.i_eat.shape[0] < n:
+        pad = np.zeros((n - pop.i_eat.shape[0], pop.i_eat.shape[1]), dtype=bool)
+        pop.i_eat = np.vstack([pop.i_eat, pad])
+
+
 def _resolve_attack(pop: Population, i: int, params: EcoParams) -> None:
     target = pop.nearest_index(pop.x[i], pop.y[i], _ATTACK_RANGE, exclude=i)
     if target is None:
         return
+    pop.acted_attack[i] = True
     power = pop.traits[i, _IX_ATK]
     pop.energy[i] = max(0.0, pop.energy[i] - params.attack_cost)
     damage = max(0.0, power - pop.traits[target, _IX_ARM]) * 0.15
@@ -358,6 +378,7 @@ def _last_rites(world: World, pop: Population, params: EcoParams) -> None:
     if n_offspring <= 0:
         return
     pop.energy[i] -= params.repro_cost
+    pop.acted_mate[i] = True
     parent_species = int(pop.species_id[i])
     child_genome = mutate(
         crossover(pop.genomes[i], pop.genomes[i], rng, a_is_fitter=True),
@@ -393,6 +414,7 @@ def _reproduce(world: World, pop: Population, params: EcoParams) -> None:
     # give it one last, asexual option (see `_last_rites`). The instant a
     # second individual exists (even its own clone) this function goes back
     # to ordinary pairing on the next tick.
+    pop.acted_mate = np.zeros(len(pop), dtype=bool)
     if len(pop) == 1:
         _last_rites(world, pop, params)
         return
@@ -447,6 +469,7 @@ def _reproduce(world: World, pop: Population, params: EcoParams) -> None:
             continue
         paired.add(i)
         paired.add(partner)
+        pop.acted_mate[i] = pop.acted_mate[partner] = True
 
         # litter size is genetically encoded (mean of both parents' evolvable
         # `litter_size`), realised as a Poisson draw so a high-fecundity

@@ -38,6 +38,8 @@ class SimulationScreen(Screen):
         self.entities = EntityRenderer()
         self._selected_id: int | None = None
         self._show_entities = True
+        self._show_ports = True
+        self._show_actions = True
         self._show_food = True
         self._show_species = False
         self.species_panel = SpeciesPanel()
@@ -147,6 +149,10 @@ class SimulationScreen(Screen):
             self._save()
         elif key == pygame.K_h:
             self._show_entities = not self._show_entities
+        elif key == pygame.K_p:
+            self._show_ports = not self._show_ports
+        elif key == pygame.K_k:
+            self._show_actions = not self._show_actions
         elif key == pygame.K_TAB:
             self._show_species = not self._show_species
         elif key == pygame.K_g:
@@ -182,7 +188,10 @@ class SimulationScreen(Screen):
             self.food_renderer.draw(surface, self.camera, self.world)
         self.overlay.draw(surface, self.camera, self.world)
         if self._show_entities:
-            self.entities.draw(surface, self.camera, self.world)
+            self.entities.draw(
+                surface, self.camera, self.world,
+                show_ports=self._show_ports, show_actions=self._show_actions,
+            )
         self._draw_top_bar(surface)
         self._draw_hint_bar(surface)
         self._draw_inspector(surface)
@@ -232,6 +241,35 @@ class SimulationScreen(Screen):
         i = self.world.population.index_of(self._selected_id)
         return None if i is None else self.world.population.snapshot(i)
 
+    @staticmethod
+    def _flag(pop, name: str, row: int) -> bool:
+        arr = getattr(pop, name, None)
+        return arr is not None and row < arr.shape[0] and bool(arr[row])
+
+    def _port_lines(self, genome, pop, row) -> list[str]:
+        if not genome.ports:
+            return []
+        in_vals: list[float] = []
+        out_vals: list[float] = []
+        brains = getattr(pop, "brains", None) if pop is not None else None
+        if brains is not None and row is not None:
+            in_vals, out_vals = brains.port_readout(row)
+        lines = [f"ports ({len(genome.ports)}):"]
+        ii = io = 0
+        for p in genome.ports:
+            if p.mode == "in":
+                act = in_vals[ii] if ii < len(in_vals) else 0.0
+                ii += 1
+            else:
+                act = out_vals[io] if io < len(out_vals) else 0.0
+                io += 1
+            bar = "#" * int(min(1.0, abs(act)) * 8)
+            lines.append(
+                f" {p.mode.upper():3} θ{p.angle:+.2f} arc{p.arc:.2f} "
+                f"reach{p.reach:.1f} gain{p.gain:.2f}  {act:+.2f} {bar}"
+            )
+        return lines
+
     def _draw_inspector(self, surface: pygame.Surface) -> None:
         entity = self._selected()
         if entity is None:
@@ -242,6 +280,24 @@ class SimulationScreen(Screen):
         out_ports = len(g.ports) - in_ports
         params = self.world.eco_params
         ceiling = max_hp(g, params, entity.age) if params else 1.0
+
+        pop = self.world.population
+        row = pop.index_of(entity.id) if pop is not None else None
+        acting = []
+        if row is not None:
+            if self._flag(pop, "acted_attack", row):
+                acting.append("ATTACK")
+            elif self._flag(pop, "i_attack", row):
+                acting.append("attack?")
+            if self._flag(pop, "acted_eat", row):
+                acting.append("EAT")
+            elif pop.i_eat.shape[0] > row and pop.i_eat[row].any():
+                acting.append("eat?")
+            if self._flag(pop, "acted_mate", row):
+                acting.append("MATE")
+            elif self._flag(pop, "i_mate", row):
+                acting.append("mate?")
+
         lines = [
             f"organism #{entity.id}   gen {entity.generation}   species {entity.species_id}",
             f"energy {entity.energy:.2f}   hp {entity.hp:.2f} / {ceiling:.2f} max   age {entity.age:,}",
@@ -257,6 +313,10 @@ class SimulationScreen(Screen):
             f"brain: {g.node_count} nodes · {g.enabled_conn_count} conns · "
             f"ports {in_ports}in/{out_ports}out",
         ]
+        if acting:
+            lines.append("acting: " + "  ".join(acting))
+        lines += self._port_lines(g, pop, row)
+
         font = self.app.fonts.get(14)
         pad, lh = 10, 18
         pw = max(font.size(s)[0] for s in lines) + pad * 2
@@ -344,8 +404,11 @@ class SimulationScreen(Screen):
         if self.world.ecosystem_enabled:
             overlay = self.overlay.label or "off"
             food = "on" if self._show_food else "off"
+            ports = "on" if self._show_ports else "off"
+            acts = "on" if self._show_actions else "off"
             text += (f"   |   C: food ({food})   T/1-6: overlay ({overlay})   "
-                     f"H: organisms   Tab: species   G: species lab   click: inspect")
+                     f"H: organisms   P: ports ({ports})   K: actions ({acts})   "
+                     f"Tab: species   G: species lab   click: inspect")
         rendered = self.app.fonts.get(14).render(text, True, theme.TEXT_DIM)
         bar = pygame.Rect(0, h - 26, w, 26)
         pygame.draw.rect(surface, theme.PANEL, bar)

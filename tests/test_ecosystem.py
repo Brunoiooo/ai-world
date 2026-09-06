@@ -270,6 +270,54 @@ def test_feeding_excretes_enzyme_onto_the_tile():
     assert world.food.values[ENZYME_IX, ty, tx] > 0.0
 
 
+def test_act_system_records_outcome_flags_for_the_ui():
+    world = make_world(population=4)
+    pop = world.population
+    _feed_once(world, diet_value=1.0)
+    # the fed organism is flagged, and every outcome array is row-aligned
+    assert pop.acted_eat[0]
+    for name in ("acted_attack", "acted_eat", "acted_mate"):
+        assert getattr(pop, name).shape[0] == len(pop)
+
+
+def test_attack_outcome_flag_set_on_a_landed_hit():
+    world = make_world(population=6)
+    pop = world.population
+    pop.x[0], pop.y[0] = 30.0, 30.0
+    pop.x[1], pop.y[1] = 30.5, 30.0
+    pop.traits[0, TRAIT_IX["attack_power"]] = 1.0
+    pop.rebuild_index()
+    n = len(pop)
+    pop.i_turn = np.zeros(n)
+    pop.i_thrust = np.zeros(n)
+    pop.i_mate = np.zeros(n, dtype=bool)
+    pop.i_eat = np.zeros((n, N_FOOD_TYPES), dtype=bool)
+    pop.i_attack = np.zeros(n, dtype=bool)
+    pop.i_attack[0] = True
+
+    act_system(world)
+    assert pop.acted_attack[0]
+    assert not pop.acted_attack[2:].any()
+
+
+def test_outcome_flags_stay_aligned_through_a_death():
+    world = make_world(population=6)
+    pop = world.population
+    pop.rebuild_index()
+    n = len(pop)
+    pop.i_turn = np.zeros(n)
+    pop.i_thrust = np.zeros(n)
+    pop.i_mate = np.zeros(n, dtype=bool)
+    pop.i_eat = np.zeros((n, N_FOOD_TYPES), dtype=bool)
+    pop.i_attack = np.zeros(n, dtype=bool)
+    act_system(world)
+    pop.hp[0] = 0.0  # kill the first row -> keep() swap-removes it
+    vitals_system(world)
+    for name in ("i_attack", "i_mate", "acted_attack", "acted_eat", "acted_mate"):
+        assert getattr(pop, name).shape[0] == len(pop)
+    assert pop.i_eat.shape[0] == len(pop)
+
+
 def test_determinism_same_seed_same_trajectory():
     a, b = make_world(seed=7), make_world(seed=7)
     run(a, 400)
