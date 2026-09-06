@@ -119,6 +119,34 @@ def rebuild_ecosystem(
     world.population = population
 
 
+def _clustered_spawn_positions(
+    land: np.ndarray, params: EcoParams, rng: np.random.Generator
+) -> np.ndarray:
+    """Founder positions grouped into a handful of clusters instead of spread
+    uniformly across the whole map. A uniform spawn scatters the survivors of
+    the early die-off (blind organisms have poor odds for their first few
+    hundred ticks) far beyond mating_range, so a population that drops to a
+    handful of individuals can end up too sparse to ever find a partner again.
+    Clustering keeps founders -- and their descendants -- within recovery
+    distance of each other."""
+    n = params.initial_population
+    n_clusters = max(1, min(n, params.spawn_clusters))
+    centers = land[rng.integers(0, len(land), size=n_clusters)]
+    assign = rng.integers(0, n_clusters, size=n)
+    radius2 = params.spawn_cluster_radius ** 2
+    positions = np.empty((n, 2), dtype=np.int64)
+    for c, center in enumerate(centers):
+        idx = np.flatnonzero(assign == c)
+        if len(idx) == 0:
+            continue
+        d2 = (land[:, 0] - center[0]) ** 2 + (land[:, 1] - center[1]) ** 2
+        candidates = land[d2 <= radius2]
+        if len(candidates) == 0:
+            candidates = center[None, :]
+        positions[idx] = candidates[rng.integers(0, len(candidates), size=len(idx))]
+    return positions
+
+
 def _seed_population(world: World) -> None:
     params, rng, innov = world.eco_params, world.eco_rng, world.innovations
     assert params and rng is not None and innov is not None
@@ -127,7 +155,7 @@ def _seed_population(world: World) -> None:
     land = np.argwhere(np.isin(world.grid.cells, _SPAWN_TILES))
     if len(land) == 0:
         return
-    picks = land[rng.integers(0, len(land), size=params.initial_population)]
+    picks = _clustered_spawn_positions(land, params, rng)
     newborns = [
         Entity(
             id=world.population.new_id(),

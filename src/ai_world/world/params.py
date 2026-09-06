@@ -54,8 +54,46 @@ class EcoParams:
 
     # --- population ----------------------------------------------------
     initial_population: int = 500
-    spawn_energy: float = 0.55
+    spawn_energy: float = 0.8          # was 0.55 -- barely above repro_cost (0.5), so a
+                                        # blind organism's first mating attempt (fired by
+                                        # the seed bias below) left it with ~0 energy and
+                                        # no buffer to survive until it learned to forage.
     # No population cap: the food supply + mortality set the equilibrium.
+
+    # The initial cohort is dropped in a handful of clusters rather than spread
+    # uniformly across the whole map. A uniform spawn scatters survivors of the
+    # early die-off (see spawn_energy above, and genome.random_blind's seed
+    # bias) far beyond mating_range, so a population that drops to a handful of
+    # individuals can end up too sparse to ever find a partner again (observed:
+    # ~66-tile mean pairwise distance among 8 survivors on a 144x144 map). A
+    # clustered spawn keeps founders -- and the founders' descendants -- close
+    # enough to recover from a bad cull instead of stalling or dying out.
+    spawn_clusters: int = 8
+    spawn_cluster_radius: float = 10.0  # tiles; matches mating_range by design
+
+    # --- reproduction: density-adaptive mating range ---------------------
+    # mating_range (below) is sized for a healthy population; at very low
+    # population it becomes an Allee-effect trap (mate_frac stays high but
+    # nobody is ever in range). Below mating_range_ref_pop, the effective
+    # search radius widens up to mating_range_max_mult x, tapering back to 1x
+    # once the population recovers.
+    mating_range_ref_pop: float = 50.0
+    mating_range_max_mult: float = 4.0
+
+    # --- reproduction: last-resort rescue at the very bottom -------------
+    # At or below this many living organisms, two more rules relax on top of
+    # the density scaling above:
+    #  - the mating_range_max_mult cap comes off entirely (search the whole
+    #    map) -- 4x still wasn't enough at n=2 in testing (survivors 42 tiles
+    #    apart, cap tops out at 40);
+    #  - the brain's `mate` output is bypassed for anyone who can otherwise
+    #    afford a child. A lineage's mate drive can drift to permanently off
+    #    through ordinary mutation with nobody left to select against it --
+    #    observed directly: two survivors sitting at full energy, zero
+    #    cooldown, compatible mating types, for 13,000+ ticks, `i_mate=False`
+    #    every single tick. Below this floor there is no population left to
+    #    lose by overriding that decision.
+    critical_population: int = 3
 
     # --- brain --------------------------------------------------------
     brain_initial_width: int = 48  # starting batch-padding width G for the brain
@@ -78,7 +116,16 @@ class EcoParams:
     port_upkeep: float = 0.00020         # x sum(gain * reach^2 / arc)
     move_cost: float = 0.010             # x size x speed^2 (mass in motion -- a
                                          # bigger body pays more to shift itself)
-    attack_cost: float = 0.02
+    attack_cost: float = 0.01            # was 0.02 -- with armor cheap to raise to parity
+                                         # with attack (same combat_upkeep coefficient for
+                                         # both), a swing that fails to penetrate armor
+                                         # still paid this flat cost, making attack a
+                                         # strictly dominated strategy in practice
+                                         # (observed: attack_frac stayed <=0.1% across
+                                         # every run). Halved so a losing swing is cheap
+                                         # enough that aggression stays a live option
+                                         # instead of being taxed out of the gene pool
+                                         # before it can be tested against armor.
     emit_cost: float = 0.003
     eat_attempt_cost: float = 0.0012     # x number of eat gates held open this tick.
                                          # Firing `eat` costs whether or not the tile

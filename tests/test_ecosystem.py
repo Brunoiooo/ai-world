@@ -174,7 +174,12 @@ def test_sexual_reproduction_crosses_two_parents():
     pop.i_thrust = np.zeros(n)
     pop.i_eat = np.zeros((n, N_FOOD_TYPES), dtype=bool)
     pop.i_attack = np.zeros(n, dtype=bool)
-    pop.i_mate = np.ones(n, dtype=bool)
+    # only the intended pair (0, 1) is willing -- at this population size the
+    # density-adaptive mating range (see _reproduce) widens well past 10
+    # tiles, so leaving the other filler organisms willing too is no longer
+    # safely isolated by distance alone.
+    pop.i_mate = np.zeros(n, dtype=bool)
+    pop.i_mate[0] = pop.i_mate[1] = True
 
     before = len(pop)
     act_system(world)

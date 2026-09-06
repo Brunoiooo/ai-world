@@ -303,9 +303,13 @@ class Genome:
         seed_outputs = [n for n in FIXED_OUTPUTS if n.startswith("eat_")] + ["mate"]
         for name in seed_outputs:
             # mildly positive mean so most seed organisms at least try; still
-            # often negative, and free for mutation to flip either way.
+            # often negative, and free for mutation to flip either way. Mean
+            # lowered from 0.5 -- at 0.5 essentially the whole blind cohort
+            # fired eat/mate in lockstep on tick 1 (observed: +99 births out
+            # of 500 in the very first tick), which is a bigger synchronised
+            # burst than "give evolution something to select on" needs.
             _connect(genome, bias, N_PROPRIO + FIXED_OUTPUTS.index(name),
-                     float(rng.normal(0.5, 1.0)), innov)
+                     float(rng.normal(0.2, 1.0)), innov)
         return genome
 
 

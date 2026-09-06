@@ -329,19 +329,86 @@ def _resolve_attack(pop: Population, i: int, params: EcoParams) -> None:
     pop.energy[i] = max(0.0, pop.energy[i] - params.attack_cost)
     damage = max(0.0, power - pop.traits[target, _IX_ARM]) * 0.15
     pop.hp[target] -= damage
-    stolen = min(pop.energy[target], damage * 0.5)
+    # a successful hit's payoff was raised (0.5 -> 0.6) alongside the lower
+    # attack_cost -- landing a real hit needs to be worth more than the risk
+    # of a swing that doesn't penetrate armor, or aggression never gets tried.
+    stolen = min(pop.energy[target], damage * 0.6)
     pop.energy[target] -= stolen
     pop.energy[i] = pop.energy[i] + stolen
+
+
+def _last_rites(world: World, pop: Population, params: EcoParams) -> None:
+    """The true end of the line: exactly one organism is left alive. Sexual
+    reproduction needs two, so no amount of range-widening or gate-bypassing
+    in `_reproduce` can ever fire for it -- it will sit there, well-fed and
+    willing, until old age or a bad tick kills it and the world goes silent.
+    As a last resort (not a steady-state strategy: capped at one offspring
+    per cooldown window), let it clone itself through the ordinary
+    crossover-with-itself + mutate pipeline -- a real mutated descendant, not
+    a bit-for-bit copy. As soon as a second individual exists, ordinary
+    sexual pairing (with its species / mating-type gates) takes back over on
+    the very next tick."""
+    i = 0
+    if not (pop.energy[i] >= params.repro_cost and pop.repro_cd[i] <= 0):
+        return
+    rng = world.eco_rng
+    n_offspring = min(1, int(pop.energy[i] // params.repro_cost))
+    cooldown_mult = pop.traits[i, _IX_REPRO_MULT]
+    pop.repro_cd[i] = max(1, int(round(params.repro_cooldown * cooldown_mult)))
+    if n_offspring <= 0:
+        return
+    pop.energy[i] -= params.repro_cost
+    parent_species = int(pop.species_id[i])
+    child_genome = mutate(
+        crossover(pop.genomes[i], pop.genomes[i], rng, a_is_fitter=True),
+        rng, world.innovations, params,
+    )
+    cx = pop.x[i] + rng.normal(0.0, 1.0)
+    cy = pop.y[i] + rng.normal(0.0, 1.0)
+    newborn = Entity(
+        id=pop.new_id(),
+        x=min(max(cx, 0.0), world.width - 1e-3),
+        y=min(max(cy, 0.0), world.height - 1e-3),
+        heading=float(rng.random() * _TWO_PI),
+        energy=1.5 * params.repro_cost,
+        hp=1.0,
+        genome=child_genome,
+        birth_tick=world.tick,
+        generation=int(pop.generation[i]) + 1,
+        species_id=world.species.assign(child_genome, world.tick, parent_species),
+        parent_a=int(pop.id[i]),
+        parent_b=int(pop.id[i]),
+    )
+    pop.add_many([newborn])
+    pop.births += 1
 
 
 def _reproduce(world: World, pop: Population, params: EcoParams) -> None:
     """Sexual reproduction: pair up willing, species-compatible neighbours of a
     compatible mating type; the litter is however many NEAT crossovers (each
     mutated independently) the pair's fecundity genes and energy afford."""
+    # a lone survivor has nobody to pair with -- no widened range or gate
+    # override changes that, since sex needs two. Rather than let a single
+    # well-fed individual's line vanish purely because of that arithmetic,
+    # give it one last, asexual option (see `_last_rites`). The instant a
+    # second individual exists (even its own clone) this function goes back
+    # to ordinary pairing on the next tick.
+    if len(pop) == 1:
+        _last_rites(world, pop, params)
+        return
+
     # the gates are physical, not decisions: a parent must hold at least the
     # energy for one offspring, and must be off its post-mating cooldown.
-    # When to mate (within those limits) is entirely the brain's call.
-    willing = pop.i_mate & (pop.energy >= params.repro_cost) & (pop.repro_cd <= 0)
+    # When to mate (within those limits) is entirely the brain's call --
+    # except at the very bottom, see `critical` below.
+    n = len(pop)
+    critical = n <= params.critical_population
+    eligible = (pop.energy >= params.repro_cost) & (pop.repro_cd <= 0)
+    # at or below critical_population, a lineage's `mate` output can have
+    # drifted to permanently off with nobody left to select against it, so
+    # bypass the brain's decision for anyone who can otherwise afford a
+    # child -- there is no population left to lose by overriding it.
+    willing = eligible if critical else (pop.i_mate & eligible)
     candidates = np.flatnonzero(willing)
     if candidates.size < 2:  # no population cap -- food + mortality set the size
         return
@@ -353,11 +420,29 @@ def _reproduce(world: World, pop: Population, params: EcoParams) -> None:
     newborns: list[Entity] = []
     lo2, hi2 = params.mating_type_lo ** 2, params.mating_type_hi ** 2
 
+    if critical:
+        # last resort: search the whole map rather than taper by a capped
+        # multiplier -- a 4x cap still wasn't enough at n=2 in testing
+        # (survivors 42 tiles apart, cap tops out at 40).
+        reach = math.hypot(world.width, world.height)
+    else:
+        # mating_range is sized for a healthy population; at low headcount on
+        # a large map it becomes an Allee-effect trap -- brains keep firing
+        # `mate` (observed mate_frac 60-95% during a bottleneck) but almost
+        # nobody is ever within range, so the population stalls or dies out
+        # on pure geometry rather than fitness. Widen the search radius as
+        # the population thins out, tapering back to 1x once recovered.
+        range_mult = min(
+            params.mating_range_max_mult,
+            max(1.0, params.mating_range_ref_pop / max(n, 1)),
+        )
+        reach = params.mating_range * range_mult
+
     for i in candidates:
         i = int(i)
         if i in paired:
             continue
-        partner = _find_partner(pop, i, willing, paired, mt, lo2, hi2, params.mating_range)
+        partner = _find_partner(pop, i, willing, paired, mt, lo2, hi2, reach)
         if partner is None:
             continue
         paired.add(i)
@@ -388,13 +473,28 @@ def _reproduce(world: World, pop: Population, params: EcoParams) -> None:
 
         a_fitter = pop.energy[i] >= pop.energy[partner]
         parent_species = int(pop.species_id[i])
+        # the geometric midpoint assumes parents are close together, true at
+        # the normal mating_range but not under the critical "search the
+        # whole map" reach above -- a child born at the midpoint of two
+        # parents 40+ tiles apart can land in terrain neither parent is
+        # anywhere near (observed: spawned on bare rock/snow between two
+        # forest-dwellers, starved before the next census, over and over).
+        # Anchor on the fitter parent's own -- already proven viable -- spot
+        # instead whenever that gap could matter.
+        if critical:
+            anchor_x = pop.x[i] if a_fitter else pop.x[partner]
+            anchor_y = pop.y[i] if a_fitter else pop.y[partner]
         for _ in range(n_offspring):
             child_genome = mutate(
                 crossover(pop.genomes[i], pop.genomes[partner], rng, a_is_fitter=a_fitter),
                 rng, world.innovations, params,
             )
-            cx = 0.5 * (pop.x[i] + pop.x[partner]) + rng.normal(0.0, 1.0)
-            cy = 0.5 * (pop.y[i] + pop.y[partner]) + rng.normal(0.0, 1.0)
+            if critical:
+                cx = anchor_x + rng.normal(0.0, 1.0)
+                cy = anchor_y + rng.normal(0.0, 1.0)
+            else:
+                cx = 0.5 * (pop.x[i] + pop.x[partner]) + rng.normal(0.0, 1.0)
+                cy = 0.5 * (pop.y[i] + pop.y[partner]) + rng.normal(0.0, 1.0)
             newborns.append(
                 Entity(
                     id=pop.new_id(),
