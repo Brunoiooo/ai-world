@@ -19,6 +19,7 @@ from ai_world.world.params import EcoParams
 
 _INDEX_CELL = 8       # tiles per spatial-hash bucket
 _KEY_STRIDE = 1 << 20  # packs (gx, gy) into one int; > any realistic grid / _INDEX_CELL
+_EMPTY_IDX = np.zeros(0, dtype=np.intp)
 TRAIT_IX = {name: i for i, name in enumerate(PHYS_FIELDS)}
 
 _SCALAR_COLUMNS = (
@@ -200,32 +201,52 @@ class Population:
         ends = np.append(starts[1:], n)
         self._buckets = {int(k): (int(s), int(e)) for k, s, e in zip(uniq, starts, ends)}
 
-    def neighbours(self, x: float, y: float, radius: float) -> list[int]:
+    def _candidate_rows(self, x: float, y: float, radius: float) -> np.ndarray:
+        """Row indices in every spatial-hash bucket overlapping the query disc,
+        before the exact-distance filter. Concatenated in the same bucket /
+        within-bucket order the old Python double loop visited them."""
+        if not self._buckets:
+            return _EMPTY_IDX
         cx, cy = int(x) // _INDEX_CELL, int(y) // _INDEX_CELL
         span = int(radius // _INDEX_CELL) + 1
-        r2 = radius * radius
-        out: list[int] = []
+        parts: list[np.ndarray] = []
         for gx in range(cx - span, cx + span + 1):
+            base = gx * _KEY_STRIDE
             for gy in range(cy - span, cy + span + 1):
-                cell = self._buckets.get(gx * _KEY_STRIDE + gy)
-                if cell is None:
-                    continue
-                for i in self._sorted_idx[cell[0]:cell[1]]:
-                    if (self.x[i] - x) ** 2 + (self.y[i] - y) ** 2 <= r2:
-                        out.append(int(i))
-        return out
+                cell = self._buckets.get(base + gy)
+                if cell is not None:
+                    parts.append(self._sorted_idx[cell[0]:cell[1]])
+        if not parts:
+            return _EMPTY_IDX
+        return parts[0] if len(parts) == 1 else np.concatenate(parts)
+
+    def neighbour_rows(self, x: float, y: float, radius: float) -> np.ndarray:
+        """Vectorised core of :meth:`neighbours` — rows within ``radius``, as an
+        array (same membership and order as the list form)."""
+        cand = self._candidate_rows(x, y, radius)
+        if not cand.size:
+            return cand
+        dx = self.x[cand] - x
+        dy = self.y[cand] - y
+        return cand[dx * dx + dy * dy <= radius * radius]
+
+    def neighbours(self, x: float, y: float, radius: float) -> list[int]:
+        return self.neighbour_rows(x, y, radius).tolist()
 
     def nearest_index(
         self, x: float, y: float, max_dist: float, *, exclude: int | None = None
     ) -> int | None:
-        best, best_d2 = None, max_dist * max_dist
-        for i in self.neighbours(x, y, max_dist):
-            if i == exclude:
-                continue
-            d2 = (self.x[i] - x) ** 2 + (self.y[i] - y) ** 2
-            if d2 <= best_d2:
-                best, best_d2 = i, d2
-        return best
+        cand = self.neighbour_rows(x, y, max_dist)
+        if exclude is not None and cand.size:
+            cand = cand[cand != exclude]
+        if not cand.size:
+            return None
+        dx = self.x[cand] - x
+        dy = self.y[cand] - y
+        d2 = dx * dx + dy * dy
+        # match the old loop's tie rule: last candidate reaching the minimum wins
+        k = d2.size - 1 - int(np.argmin(d2[::-1]))
+        return int(cand[k])
 
     def nearest(
         self, x: float, y: float, max_dist: float, *, exclude_id: int | None = None

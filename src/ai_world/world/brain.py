@@ -47,16 +47,26 @@ EAT_SLICE = slice(EAT_OUTPUT_BASE, EAT_OUTPUT_BASE + N_FOOD_TYPES)
 FOOD_SENSE_BASE = N_PROPRIO - N_FOOD_TYPES
 
 
+_ACT_FUNCS = (
+    (_ACT_ID["tanh"], torch.tanh),
+    (_ACT_ID["sigmoid"], torch.sigmoid),
+    (_ACT_ID["relu"], torch.relu),
+    (_ACT_ID["sin"], torch.sin),
+    (_ACT_ID["gauss"], lambda t: torch.exp(-(t * t))),
+    (_ACT_ID["abs"], torch.abs),
+)
+
+
 def _activate(x: torch.Tensor, act_ids: torch.Tensor) -> torch.Tensor:
-    """Per-node activation. Computes every function on the whole tensor and
-    selects — cheap at these sizes and fully vectorised."""
+    """Per-node activation. Only functions actually present in this batch are
+    evaluated (sin/gauss/abs/relu are usually absent); ``torch.where`` over an
+    all-false mask would be a no-op anyway, so the result is identical to
+    computing all six -- just without the dead transcendental passes."""
     out = x.clone()                                   # identity (id 0)
-    out = torch.where(act_ids == _ACT_ID["tanh"], torch.tanh(x), out)
-    out = torch.where(act_ids == _ACT_ID["sigmoid"], torch.sigmoid(x), out)
-    out = torch.where(act_ids == _ACT_ID["relu"], torch.relu(x), out)
-    out = torch.where(act_ids == _ACT_ID["sin"], torch.sin(x), out)
-    out = torch.where(act_ids == _ACT_ID["gauss"], torch.exp(-(x * x)), out)
-    out = torch.where(act_ids == _ACT_ID["abs"], torch.abs(x), out)
+    present = set(torch.unique(act_ids).tolist())     # one host sync, not six
+    for act_id, fn in _ACT_FUNCS:
+        if act_id in present:
+            out = torch.where(act_ids == act_id, fn(x), out)
     return out
 
 
@@ -71,6 +81,11 @@ class CompiledBrain:
     food_sense_used: int        # count of food_k proprio senses actually wired up
     in_port_slots: np.ndarray   # (k,) int64  positions of IN-port nodes
     out_port_slots: np.ndarray  # (m,) int64  positions of OUT-port nodes
+    # per-brain port params, stacked once at compile so a population port
+    # rebuild is a concatenate instead of a Python loop over every genome.
+    # each is (sig (p, C) f32, angle (p,) f64, reach (p,) f64, gain (p,) f64).
+    in_stack: tuple = ()
+    out_stack: tuple = ()
 
 
 class _PortColumns:
@@ -148,9 +163,26 @@ def compile_genome(genome: Genome, g: int) -> CompiledBrain:
     in_slots = np.array([pos[p] for p in genome.in_port_node_ids()], dtype=np.int64)
     out_slots = np.array([pos[p] for p in genome.out_port_node_ids()], dtype=np.int64)
     input_mask[in_slots] = True
+    channels = len(genome.body_signature)
+    in_ports = [p for p in genome.ports if p.mode == "in"]
+    out_ports = [p for p in genome.ports if p.mode == "out"]
     return CompiledBrain(
         weight, act_ids, input_mask, n, n_conns, genome.port_cost(),
         genome.food_sense_count(), in_slots, out_slots,
+        _stack_ports(in_ports, channels), _stack_ports(out_ports, channels),
+    )
+
+
+def _stack_ports(ports: list, channels: int) -> tuple:
+    sig = (
+        np.array([p.signature for p in ports], dtype=np.float32)
+        if ports else np.zeros((0, channels), dtype=np.float32)
+    )
+    return (
+        sig,
+        np.array([p.angle for p in ports], dtype=np.float64),
+        np.array([p.reach for p in ports], dtype=np.float64),
+        np.array([p.gain for p in ports], dtype=np.float64),
     )
 
 
@@ -236,7 +268,12 @@ class BrainStore:
         into the wider shape. ``G`` only ever grows -- there is no brain-size cap."""
         if need <= self.g:
             return
-        g2 = max(need, self.g * 2)
+        # step G up in modest increments rather than doubling: the weight tensor
+        # is (cap, G, G), so a double on a single extra node quadruples its
+        # footprint -- the driver of the out-of-memory wall on long-lived worlds
+        # where brains slowly accrete nodes. Re-pad is O(cap*G^2) and only fires
+        # when a genome first crosses the next step, not per tick.
+        g2 = max(need, self.g + 16)
         old_g = self.g
         if self._cap:
             def widen(src: torch.Tensor, shape, dtype, square: bool):
@@ -306,18 +343,42 @@ class BrainStore:
         self.food_sense_used = np.array(
             [c.food_sense_used for c in self._compiled], dtype=np.int64
         )
+        self._in_port_count = np.array(
+            [len(c.in_port_slots) for c in self._compiled], dtype=np.intp
+        )
+        self._out_port_count = np.array(
+            [len(c.out_port_slots) for c in self._compiled], dtype=np.intp
+        )
 
     def _rebuild_ports(self) -> None:
-        cols_in, cols_out = _PortColumns(self.channels), _PortColumns(self.channels)
-        for row, (genome, cb) in enumerate(zip(self._genomes, self._compiled)):
-            in_ports = [p for p in genome.ports if p.mode == "in"]
-            out_ports = [p for p in genome.ports if p.mode == "out"]
-            for port, slot in zip(in_ports, cb.in_port_slots):
-                cols_in.add(row, int(slot), port)
-            for port, slot in zip(out_ports, cb.out_port_slots):
-                cols_out.add(row, int(slot), port)
-        self.ports_in = cols_in.finish()
-        self.ports_out = cols_out.finish()
+        self.ports_in = self._gather_ports(self._in_port_count, "in")
+        self.ports_out = self._gather_ports(self._out_port_count, "out")
+
+    def _gather_ports(self, counts: np.ndarray, mode: str) -> "_PortColumns.Frozen":
+        # only the rows that actually carry a port of this mode -- typically a
+        # few percent of the population -- so the rebuild is O(ports) not O(pop).
+        rows = np.flatnonzero(counts)
+        if not rows.size:
+            return _PortColumns(self.channels).finish()
+        owner, slot, sig, angle, reach, gain = [], [], [], [], [], []
+        for row in rows:
+            cb = self._compiled[row]
+            slots = cb.in_port_slots if mode == "in" else cb.out_port_slots
+            s_sig, s_ang, s_rea, s_gai = cb.in_stack if mode == "in" else cb.out_stack
+            owner.append(np.full(slots.shape[0], row, dtype=np.intp))
+            slot.append(slots.astype(np.intp, copy=False))
+            sig.append(s_sig)
+            angle.append(s_ang)
+            reach.append(s_rea)
+            gain.append(s_gai)
+        return _PortColumns.Frozen(
+            np.concatenate(owner),
+            np.concatenate(slot),
+            np.concatenate(sig),
+            np.concatenate(angle),
+            np.concatenate(reach),
+            np.concatenate(gain),
+        )
 
     # test/introspection helper: how many IN ports across the population
     @property

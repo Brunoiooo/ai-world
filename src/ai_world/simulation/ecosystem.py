@@ -455,7 +455,7 @@ def _reproduce(world: World, pop: Population, params: EcoParams) -> None:
     rng = world.eco_rng
     registry = world.species
     mt = pop.mating_type
-    paired: set[int] = set()
+    paired = np.zeros(n, dtype=bool)
     newborns: list[Entity] = []
     lo2, hi2 = params.mating_type_lo ** 2, params.mating_type_hi ** 2
 
@@ -479,13 +479,12 @@ def _reproduce(world: World, pop: Population, params: EcoParams) -> None:
 
     for i in candidates:
         i = int(i)
-        if i in paired:
+        if paired[i]:
             continue
         partner = _find_partner(pop, i, willing, paired, mt, lo2, hi2, reach)
         if partner is None:
             continue
-        paired.add(i)
-        paired.add(partner)
+        paired[i] = paired[partner] = True
         pop.acted_mate[i] = pop.acted_mate[partner] = True
 
         # litter size is genetically encoded (mean of both parents' evolvable
@@ -566,17 +565,23 @@ def _find_partner(pop, i, willing, paired, mt, lo2, hi2, reach) -> int | None:
     # Requiring an exact species match here can deadlock a small population:
     # the moment it (harmlessly) splits into two species, same-species pairs
     # may no longer exist locally and nobody could ever mate again.
-    best, best_d2 = None, reach * reach
-    for j in pop.neighbours(pop.x[i], pop.y[i], reach):
-        if j == i or j in paired or not willing[j]:
-            continue
-        type_d2 = float(np.sum((mt[i] - mt[j]) ** 2))
-        if not (lo2 < type_d2 < hi2):
-            continue
-        d2 = (pop.x[i] - pop.x[j]) ** 2 + (pop.y[i] - pop.y[j]) ** 2
-        if d2 < best_d2:
-            best, best_d2 = j, d2
-    return best
+    #
+    # Vectorised: `neighbour_rows` already returns the in-reach rows in the same
+    # order the old per-row loop visited them, so the closest survivor of the
+    # mating-type band is `argmin(d2)` -- same pick, same first-wins tie rule.
+    cand = pop.neighbour_rows(pop.x[i], pop.y[i], reach)
+    if not cand.size:
+        return None
+    cand = cand[willing[cand] & ~paired[cand] & (cand != i)]
+    if not cand.size:
+        return None
+    type_d2 = ((mt[cand] - mt[i]) ** 2).sum(axis=1)
+    cand = cand[(type_d2 > lo2) & (type_d2 < hi2)]
+    if not cand.size:
+        return None
+    dx = pop.x[cand] - pop.x[i]
+    dy = pop.y[cand] - pop.y[i]
+    return int(cand[np.argmin(dx * dx + dy * dy)])
 
 
 def speciation_system(world: World) -> None:
